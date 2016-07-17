@@ -6,6 +6,16 @@ def blob_to_binary_dna(x):
     return np.asarray(np.unpackbits(np.fromstring(x, dtype=np.uint8),).reshape(2,-1),
                         dtype=bool)
 
+def blob_to_quaternary_dna(x):
+    y2 = blob_to_binary_dna(x)
+    y4 = np.c_[
+                y2[0] & y2[1],
+                (~y2[0]) & y2[1],
+                y2[0] & (~y2[1]),
+                (~y2[0]) & (~y2[1]),
+                ]
+    return y4
+
 def blob_to_int_counts(x):
     return np.asarray(np.fromstring(x, dtype=np.int64), dtype=np.int64)
 
@@ -28,12 +38,12 @@ def get_bin_seqs(conn, where=None):
         #chrs, pos, binseq, count_str  = 
         yield dna_row
 
-def get_seq_batch(conn, size = 1, align = None, where=None):
+def get_seq_batch(conn, size = 1, align = None, where=None, binary=True):
     xx = []
     yy = []
+    decoder = blob_to_binary_dna if binary else blob_to_quaternary_dna
     for nn, (chrs, pos, binseq, count_str) in enumerate(get_bin_seqs(conn, where=where)):
-
-        x_ = blob_to_binary_dna(binseq)
+        x_ = decoder(binseq)
         y_ = blob_to_int_counts(count_str)
         if align is not None:
             x_, y_ = align(x_, y_)
@@ -54,22 +64,20 @@ def align_shapes(X, y):
     return X[:,start:end], y
 
 
-def get_aligned_batch(conn, size = 10, where=None):
-    for X, y in get_seq_batch(conn, size = size, align = align_shapes, where=where):
+def get_aligned_batch(conn, size = 10, where=None, binary=True):
+    for X, y in get_seq_batch(conn, size = size, align=align_shapes,
+            where=where, binary=binary):
         yield (X, y)
 
 from functools import partial
 
-def get_loader(conn, where=None):
-    return partial(get_aligned_batch, conn, where=where)
-
+def get_loader(conn, where=None, binary=True):
+    return partial(get_aligned_batch, conn, where=where, binary=binary)
 
 
 if __name__ == "__main__":
-    #pivotdir = "/ye/yelabstore/cd4.atac.seq/all.samples/intersected_tss/batf_disc1.offsets_1000_1/pivot/"
-    # dbdir = "/netapp/home/dlituiev/ataccounts/dna_fasta_extraction/"
-    pivotdir = "/Users/dlituiev/repos/qtl_atac_rna/tfmotifs/deeplearn/data/"
-    dbdir = "/Users/dlituiev/repos/qtl_atac_rna/tfmotifs/deeplearn/data/"
+    pivotdir = "../data/"
+    dbdir = "../data/"
 
     #infile = pivotdir+ "IGTB1077.batf_disc1.offsets_1000_1.pivot.tab"
     #ydf = pd.read_table(infile, index_col=[0,1])
