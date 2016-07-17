@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 #######################
 import tensorflow as tf
-from tflearn import rtflearn, vardict, batch_norm
+from tflearn import rtflearn, vardict, batch_norm, summary_dict
 
 
 # If a model is trained with multiple GPUs, prefix all Op names with tower_name
@@ -171,7 +171,8 @@ class footprint_poisson(rtflearn):
             train_xy_loader = None,
             test_xy_loader = None,
             load = True,
-            epochs = None):
+            epochs = None,
+            performance_set_size=int(1e3)):
         if epochs:
             self.epochs = epochs
         self.last_ckpt_num = 0
@@ -224,7 +225,7 @@ class footprint_poisson(rtflearn):
                                          (self.last_ckpt_num + self.epochs)//  self.display_step )):
                     "do minibatches"
                     for subepoch in tqdm(range(self.display_step)):
-                        for (_x_, _y_) in train_batch_getter:
+                        for ii, (_x_, _y_) in enumerate(train_batch_getter):
                             if len(_y_.shape) == 1:
                                 _y_ = np.reshape(_y_, [-1, 1])
                             #print("x", _x_.shape )
@@ -241,34 +242,39 @@ class footprint_poisson(rtflearn):
                     epoch = macro_epoch * self.display_step
                     # Display logs once in `display_step` epochs
 
-                    _sets_ = {"train": train_xy_loader}
+                    #train_batch_getter = train_xy_loader( self.BATCH_SIZE)
+                    #batchgetters = {"train":train_batch_getter}
+                    if test_xy_loader is not None:
+                        test_batch_getter = test_xy_loader( self.BATCH_SIZE)
+                        #batchgetters["test"] = test_batch_getter
+
+                    _sets_ = {"train": train_batch_getter}
+                    if test_xy_loader is not None:
+                        _sets_["test"] = test_batch_getter
                     summaries = {}
                     summaries_plainstr = []
-                    if test_xy_loader is not None:
-                        _sets_["test"] = test_xy_loader
 
                     for _set_, _xy_   in _sets_.items():
                         print("set:", _set_)
-                        for (_x_, _y_) in train_batch_getter:
-                            if len(_y_.shape) == 1:
-                                _y_ = np.reshape(_y_, [-1, 1])
+                        (_x_, _y_) = next(_xy_)
+                        if len(_y_.shape) == 1:
+                            _y_ = np.reshape(_y_, [-1, 1])
 
-                            feed_dict={self.vars.x: _x_,
-                                       self.vars.y: _y_, self.train_time: False}
-                            if self.dropout:
-                                feed_dict[ self.vars.keep_prob ] = self.dropout
+                        feed_dict={self.vars.x: _x_,
+                                   self.vars.y: _y_, self.train_time: False}
+                        if self.dropout:
+                            feed_dict[ self.vars.keep_prob ] = self.dropout
 
-                            summary_str = sess.run(summary_op, feed_dict=feed_dict)
-                            summary_writer.add_summary(summary_str, epoch)
-                            summary_d = summary_dict(summary_str, summary_proto)
-                            summaries[_set_] = summary_d
-                            print("---set:", _set_)
+                        summary_str = sess.run(summary_op, feed_dict=feed_dict)
+                        summary_writer.add_summary(summary_str, epoch)
+                        summary_d = summary_dict(summary_str, summary_proto)
+                        summaries[_set_] = summary_d
+                        #print("---set:", _set_)
 
-                            #summary_d["epoch"] = epoch
-                            #self.r2_progress.append( (epoch, summary_d["R2"]))
-                            summaries_plainstr.append(  "\t".join(["",_set_] +
-                                ["{:s}: {:.4f}".format(k,v) if type(v) is float else \
-                                 "{:s}: {:s}".format(k,v) for k,v in summary_d.items() ]) )
+                        #summary_d["epoch"] = epoch
+                        summaries_plainstr.append(  "\t".join(["", _set_] +
+                            ["{:s}: {:.4f}".format(k,v) if type(v) is float else \
+                             "{:s}: {:s}".format(k,v) for k,v in summary_d.items() ]) )
 
                     self.train_summary.append( summaries["train"] )
                     if  "test" in summaries:
@@ -277,6 +283,7 @@ class footprint_poisson(rtflearn):
                     logstr = "Epoch: {:4d}\t".format(epoch) +\
                                "\n"+ "\n".join(summaries_plainstr)
                     print(logstr, file = sys.stderr )
+                    print("="*40, file = sys.stderr )
                     self.saver.save(sess, self.checkpoint_dir + '/' +'model.ckpt',
                        global_step=  epoch)
                     self.last_ckpt_num = epoch
@@ -293,7 +300,7 @@ if __name__ == "__main__":
 
     flags = tf.app.flags
     FLAGS = flags.FLAGS
-    FLAGS.batch_size = 20
+    FLAGS.batch_size = 128
 
     # define flags (note that Fomoro will not pass any flags by default)
     flags.DEFINE_boolean('skip-training', False, 'If true, skip training the model.')
@@ -317,15 +324,20 @@ if __name__ == "__main__":
     conn = sqlite3.connect(dbpath)
 
     from match_dna_atac import get_aligned_batch, get_loader
-    batchloader = get_loader(conn,)
+    #from itertools import cycle
+    train_batchloader = get_loader(conn, where={"chr": "chr21"})
+    test_batchloader = get_loader(conn, where="chr = 'chr22'")
 
+    #sys.exit(1)
     trainsamples = 4000
 
     tfl = footprint_poisson(ALPHA = 2e-6,
             BATCH_SIZE = 2**8,
             dropout = False, xlen = 2001,
-            display_step = 20,
+            display_step = 100,
             )
     tfl.parameters["neg_penalty_const"] = 0.01
-    tfl.fit( train_xy_loader= batchloader)
+    tfl.fit( train_xy_loader = train_batchloader, 
+            test_xy_loader = test_batchloader,
+            performance_set_size=1000)
 
