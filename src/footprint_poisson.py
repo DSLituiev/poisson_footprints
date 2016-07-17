@@ -60,8 +60,9 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
     Returns:
       Variable Tensor
     """
-    var = _variable_on_cpu(name, shape,
-                           tf.truncated_normal_initializer(stddev=stddev))
+    #var = _variable_on_cpu(name, shape,
+    #                       tf.truncated_normal_initializer(stddev=stddev))
+    var = tf.get_variable(name, shape, initializer=tf.truncated_normal_initializer(stddev=stddev))
     if wd is not None:
         weight_decay = tf.mul(tf.nn.l2_loss(var), wd, name='weight_loss')
         tf.add_to_collection('losses', weight_decay)
@@ -71,7 +72,7 @@ class footprint_poisson(rtflearn):
     def _create_network(self):
         self.vars = vardict()
         self.train_time = tf.placeholder(tf.bool, name='train_time')
-        self.vars.x = tf.placeholder("float", shape=[None, 1, self.xlen, 2], name = "x")
+        self.vars.x = tf.placeholder("float", shape=[None, 1, self.xlen, self.xdepth], name = "x")
         self.vars.y = tf.placeholder("float", shape=[None, self.xlen], name = "y")
 
         self.vars.x = batch_norm(self.vars.x, self.train_time)
@@ -80,10 +81,11 @@ class footprint_poisson(rtflearn):
         # Create Model
         with tf.variable_scope('conv1') as scope:
             conv1_channels = 64
-            kernel = _variable_with_weight_decay('weights', shape=[1, 5, 2, conv1_channels],
-                                                 stddev=1e-4, wd=0.0)
+            kernel = _variable_with_weight_decay('weights',
+                            shape=[1, 5, self.xdepth, conv1_channels],
+                            stddev=1e-4, wd=0.0)
             conv = tf.nn.conv2d(self.vars.x, kernel, [1, 1, 1, 1], padding='SAME')
-            biases = tf.get_variable('biases', [conv1_channels], 
+            biases = tf.get_variable('biases', [conv1_channels],
                                      initializer=tf.constant_initializer(0.1))
             #biases = _variable_on_cpu('biases', [conv1_channels],
             #                          tf.constant_initializer(0.0))
@@ -329,10 +331,12 @@ if __name__ == "__main__":
     #sys.exit(1)
     trainsamples = 4000
 
+    "initialize the object"
     tfl = footprint_poisson(ALPHA = 2e-6,
             BATCH_SIZE = 2**8,
             dropout = False, xlen = 2001,
             display_step = 100,
+            xdepth = 2,
             )
     tfl.parameters["neg_penalty_const"] = 0.01
     tfl.fit( train_xy_loader = train_batchloader, 
