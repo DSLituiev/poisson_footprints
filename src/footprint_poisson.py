@@ -263,7 +263,8 @@ class footprint_poisson(rtflearn):
                             feed_dict[ self.vars.keep_prob ] = self.dropout
 
                         summary_str = sess.run(summary_op, feed_dict=feed_dict)
-                        summary_writer.add_summary(summary_str, epoch)
+                        if _set_ == "test":
+                            summary_writer.add_summary(summary_str, epoch)
                         summary_d = summary_dict(summary_str, summary_proto)
                         summaries[_set_] = summary_d
                         #print("---set:", _set_)
