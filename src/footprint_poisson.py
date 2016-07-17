@@ -221,32 +221,29 @@ class footprint_poisson(rtflearn):
                 print("training epochs: %u ... %u, saving each %u' epoch" % \
                         (self.last_ckpt_num, self.last_ckpt_num + self.epochs, self.display_step),
                         file = sys.stderr)
-                for macro_epoch in tqdm(range( self.last_ckpt_num//self.display_step ,
-                                         (self.last_ckpt_num + self.epochs)//  self.display_step )):
-                    "do minibatches"
-                    for subepoch in tqdm(range(self.display_step)):
-                        for ii, (_x_, _y_) in enumerate(train_batch_getter):
-                            if len(_y_.shape) == 1:
-                                _y_ = np.reshape(_y_, [-1, 1])
-                            #print("x", _x_.shape )
-                            #print("y", _y_.shape )
-                            #print(".", end="\n", file=sys.stderr)
-                            if self.dropout:
-                                feed_dict={ self.vars.x: _x_, self.vars.y: _y_,
-                                            self.vars.keep_prob : self.dropout}
-                            else:
-                                feed_dict={ self.vars.x: _x_, self.vars.y: _y_ ,
-                                            self.train_time: True}
-                            #print("feed_dict", feed_dict)
-                            sess.run(train_op, feed_dict = feed_dict)
-                    epoch = macro_epoch * self.display_step
-                    # Display logs once in `display_step` epochs
+                #for macro_epoch in tqdm(range( self.last_ckpt_num//self.display_step ,
+                #                         (self.last_ckpt_num + self.epochs)//  self.display_step )):
+                "do minibatches"
+                for epoch in tqdm(range(self.epochs)):
+                    for ii, (_x_, _y_) in enumerate(train_batch_getter):
+                        if len(_y_.shape) == 1:
+                            _y_ = np.reshape(_y_, [-1, 1])
+                        #print("x", _x_.shape )
+                        #print("y", _y_.shape )
+                        #print(".", end="\n", file=sys.stderr)
+                        if self.dropout:
+                            feed_dict={ self.vars.x: _x_, self.vars.y: _y_,
+                                        self.vars.keep_prob : self.dropout}
+                        else:
+                            feed_dict={ self.vars.x: _x_, self.vars.y: _y_ ,
+                                        self.train_time: True}
+                        #print("feed_dict", feed_dict)
+                        sess.run(train_op, feed_dict = feed_dict)
+                    "Display logs once in `display_step` epochs"
 
-                    #train_batch_getter = train_xy_loader( self.BATCH_SIZE)
-                    #batchgetters = {"train":train_batch_getter}
+                    train_batch_getter = train_xy_loader( self.BATCH_SIZE)
                     if test_xy_loader is not None:
                         test_batch_getter = test_xy_loader( self.BATCH_SIZE)
-                        #batchgetters["test"] = test_batch_getter
 
                     _sets_ = {"train": train_batch_getter}
                     if test_xy_loader is not None:
@@ -255,7 +252,7 @@ class footprint_poisson(rtflearn):
                     summaries_plainstr = []
 
                     for _set_, _xy_   in _sets_.items():
-                        print("set:", _set_)
+                        #print("set:", _set_)
                         (_x_, _y_) = next(_xy_)
                         if len(_y_.shape) == 1:
                             _y_ = np.reshape(_y_, [-1, 1])
@@ -340,4 +337,3 @@ if __name__ == "__main__":
     tfl.fit( train_xy_loader = train_batchloader, 
             test_xy_loader = test_batchloader,
             performance_set_size=1000)
-

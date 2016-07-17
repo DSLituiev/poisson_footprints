@@ -1,0 +1,4 @@
+src/tflearn
+src/checkpoints
+src/logs
+data/
