@@ -70,6 +70,7 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
 
 class footprint_poisson(rtflearn):
     def _create_network(self):
+        weight_decay = self.weight_decay
         self.vars = vardict()
         self.train_time = tf.placeholder(tf.bool, name='train_time')
         self.vars.x = tf.placeholder("float", shape=[None, 1, self.xlen, self.xdepth], name = "x")
@@ -83,7 +84,7 @@ class footprint_poisson(rtflearn):
             conv1_channels = 64
             kernel = _variable_with_weight_decay('weights',
                             shape=[1, 5, self.xdepth, conv1_channels],
-                            stddev=1e-4, wd=0.0)
+                            stddev=1e-4, wd=weight_decay)
             conv = tf.nn.conv2d(self.vars.x, kernel, [1, 1, 1, 1], padding='SAME')
             biases = tf.get_variable('biases', [conv1_channels],
                                      initializer=tf.constant_initializer(0.1))
@@ -101,7 +102,7 @@ class footprint_poisson(rtflearn):
         # conv2
         with tf.variable_scope('conv2') as scope:
             kernel = _variable_with_weight_decay('weights', shape=[1, 5, 64, 64],
-                                                 stddev=1e-4, wd=0.0)
+                                                 stddev=1e-4, wd=weight_decay)
             conv = tf.nn.conv2d(norm1, kernel, [1, 1, 1, 1], padding='SAME')
             #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
             biases = tf.get_variable('biases', [64],
@@ -124,7 +125,7 @@ class footprint_poisson(rtflearn):
             dim =  np.prod(np.array([int(x) for x in pool2.get_shape()[1:]]))
             reshape = tf.reshape(pool2, [-1, dim])
             weights = _variable_with_weight_decay('weights', shape=[dim, self.xlen],
-                                                  stddev=0.04, wd=0.004)
+                                                  stddev=0.04, wd=weight_decay)
             #biases = _variable_on_cpu('biases', [self.xlen], tf.constant_initializer(0.1))
             biases = tf.get_variable('biases', [self.xlen],
                                      initializer=tf.constant_initializer(0.1))
@@ -152,10 +153,14 @@ class footprint_poisson(rtflearn):
 
         poisson_loss = tf.reduce_mean(tf.abs(y_pred_pos) - self.vars.y * tf.log(1 + tf.abs(y_pred_pos)),
                                       name = "poisson_loss")
+        tf.add_to_collection('losses', poisson_loss)
+        tf.add_to_collection('losses', self.parameters["neg_penalty_const"] * y_pred_neg_penalty)
+
+        #tf.add_n(tf.get_collection('losses'), name='total_loss')
         tf.scalar_summary("poisson_loss", poisson_loss )
         tf.scalar_summary( "neg_penalty", y_pred_neg_penalty )
 
-        tot_loss = poisson_loss + self.parameters["neg_penalty_const"] * y_pred_neg_penalty
+        tot_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
         l2_loss = tf.reduce_mean(tf.pow( self.vars.y_predicted - self.vars.y, 2))
         tf.scalar_summary( "loss" , tot_loss )
@@ -337,6 +342,7 @@ if __name__ == "__main__":
             dropout = False, xlen = 2001,
             display_step = 100,
             xdepth = 2,
+            weight_decay = 1e-2,
             )
     tfl.parameters["neg_penalty_const"] = 0.01
     tfl.fit( train_xy_loader = train_batchloader, 
