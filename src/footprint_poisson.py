@@ -70,7 +70,10 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
 
 class footprint_poisson(rtflearn):
     def _create_network(self):
+        #print("conv1_channels", self.conv1_channels)
+        #print("conv2_channels", self.conv2_channels)
         weight_decay = self.weight_decay
+        conv_wd=self.weight_decay
         self.vars = vardict()
         self.train_time = tf.placeholder(tf.bool, name='train_time')
         self.vars.x = tf.placeholder("float", shape=[None, 1, self.xlen, self.xdepth], name = "x")
@@ -81,18 +84,19 @@ class footprint_poisson(rtflearn):
 
         # Create Model
         with tf.variable_scope('conv1') as scope:
-            conv1_channels = 64
             kernel = _variable_with_weight_decay('weights',
-                            shape=[1, 5, self.xdepth, conv1_channels],
-                            stddev=1e-4, wd=weight_decay)
+                            shape=[1, 5, self.xdepth, self.conv1_channels],
+                            stddev=1e-4, wd= conv_wd)
             conv = tf.nn.conv2d(self.vars.x, kernel, [1, 1, 1, 1], padding='SAME')
-            biases = tf.get_variable('biases', [conv1_channels],
-                                     initializer=tf.constant_initializer(0.1))
+            biases = tf.get_variable('biases', [self.conv1_channels],
+                                     initializer=tf.constant_initializer(0.01))
             #biases = _variable_on_cpu('biases', [conv1_channels],
             #                          tf.constant_initializer(0.0))
             bias = tf.nn.bias_add(conv, biases)
             conv1 = tf.nn.relu(bias, name=scope.name)
+            print("conv1", conv1.get_shape())
             _activation_summary(conv1)
+            conv1 = tf.nn.dropout(conv1, 1-self.dropout)
         # pool1
         pool1 = tf.nn.max_pool(conv1, ksize=[1, 1, 3, 1], strides=[1, 1, 2, 1],
                                padding='SAME', name='pool1')
@@ -101,15 +105,18 @@ class footprint_poisson(rtflearn):
                           name='norm1')
         # conv2
         with tf.variable_scope('conv2') as scope:
-            kernel = _variable_with_weight_decay('weights', shape=[1, 5, 64, 64],
-                                                 stddev=1e-4, wd=weight_decay)
+            kernel = _variable_with_weight_decay('weights',
+                                    shape=[1, 5, self.conv1_channels, self.conv2_channels],
+                                    stddev=1e-4, wd=conv_wd)
             conv = tf.nn.conv2d(norm1, kernel, [1, 1, 1, 1], padding='SAME')
             #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
-            biases = tf.get_variable('biases', [64],
+            biases = tf.get_variable('biases', [self.conv2_channels],
                                      initializer=tf.constant_initializer(0.1))
             bias = tf.nn.bias_add(conv, biases)
             conv2 = tf.nn.relu(bias, name=scope.name)
+            print("conv2", conv2.get_shape())
             _activation_summary(conv2)
+            conv2 = tf.nn.dropout(conv2, 1-self.dropout)
         # norm2
         norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
                           name='norm2')
@@ -123,6 +130,7 @@ class footprint_poisson(rtflearn):
             #reshape = tf.reshape(pool2, [FLAGS.batch_size, -1])
             #dim = reshape.get_shape()[1].value
             dim =  np.prod(np.array([int(x) for x in pool2.get_shape()[1:]]))
+            print("local3 dim:", dim)
             reshape = tf.reshape(pool2, [-1, dim])
             weights = _variable_with_weight_decay('weights', shape=[dim, self.xlen],
                                                   stddev=0.04, wd=weight_decay)
@@ -146,32 +154,32 @@ class footprint_poisson(rtflearn):
 
     def _create_loss(self):
         # Minimize the squared errors
-        print("loss")
-        epsilon = 1e-5
+        #print("loss")
         y_pred_pos = tf.nn.relu( self.vars.y_predicted)
         y_pred_neg_penalty = tf.reduce_mean( tf.nn.relu( - self.vars.y_predicted), name = "neg_penalty")
 
         poisson_loss = tf.reduce_mean(tf.abs(y_pred_pos) - self.vars.y * tf.log(1 + tf.abs(y_pred_pos)),
                                       name = "poisson_loss")
         tf.add_to_collection('losses', poisson_loss)
-        tf.add_to_collection('losses', self.parameters["neg_penalty_const"] * y_pred_neg_penalty)
+        tf.add_to_collection('losses', self.neg_penalty_const * y_pred_neg_penalty)
 
         #tf.add_n(tf.get_collection('losses'), name='total_loss')
         tf.scalar_summary("poisson_loss", poisson_loss )
         tf.scalar_summary( "neg_penalty", y_pred_neg_penalty )
 
-        tot_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+        self._loss_ = tf.to_float(self.train_time) * tf.add_n(tf.get_collection('losses'), name='total_loss') +\
+                     tf.to_float(~self.train_time)*poisson_loss
 
         l2_loss = tf.reduce_mean(tf.pow( self.vars.y_predicted - self.vars.y, 2))
-        tf.scalar_summary( "loss" , tot_loss )
+        tf.scalar_summary( "loss" , self._loss_)
         #tf.scalar_summary( "y[0]" , self.vars.y_predicted[9] )
         #tf.scalar_summary( "y_hat[0]" , self.vars.y[9,0] )
         tf.scalar_summary( "l2_loss" , l2_loss )
         "R2"
-        _, y_var = tf.nn.moments(self.vars.y, [0,1])
-        rsq =  1 - l2_loss / y_var
-        tf.scalar_summary( "R2", rsq)
-        return  tot_loss
+        # _, y_var = tf.nn.moments(self.vars.y, [0,1])
+        # rsq =  1 - l2_loss / y_var
+        # tf.scalar_summary( "R2", rsq)
+        return self._loss_
 
     def fit(self, train_X=None, train_Y=None,
             test_X= None, test_Y = None,
@@ -186,7 +194,7 @@ class footprint_poisson(rtflearn):
         self.train = True
         #self.X = train_X
         #self.xlen = train_X.shape[1]
-        self.r2_progress = []
+        self.loss=0
         self.train_summary = []
         self.test_summary = []
         #yvar = train_Y.var()
@@ -240,7 +248,8 @@ class footprint_poisson(rtflearn):
                         #print(".", end="\n", file=sys.stderr)
                         if self.dropout:
                             feed_dict={ self.vars.x: _x_, self.vars.y: _y_,
-                                        self.vars.keep_prob : self.dropout}
+                                        self.vars.keep_prob : self.dropout,
+                                        self.train_time: True}
                         else:
                             feed_dict={ self.vars.x: _x_, self.vars.y: _y_ ,
                                         self.train_time: True}
@@ -270,12 +279,12 @@ class footprint_poisson(rtflearn):
                             feed_dict[ self.vars.keep_prob ] = self.dropout
 
                         summary_str = sess.run(summary_op, feed_dict=feed_dict)
-                        if _set_ == "test":
-                            summary_writer.add_summary(summary_str, epoch)
                         summary_d = summary_dict(summary_str, summary_proto)
                         summaries[_set_] = summary_d
+                        if _set_ == "test":
+                            summary_writer.add_summary(summary_str, epoch)
+                            self.loss +=summary_d["loss"]
                         #print("---set:", _set_)
-
                         #summary_d["epoch"] = epoch
                         summaries_plainstr.append(  "\t".join(["", _set_] +
                             ["{:s}: {:.4f}".format(k,v) if type(v) is float else \
@@ -292,16 +301,44 @@ class footprint_poisson(rtflearn):
                     self.saver.save(sess, self.checkpoint_dir + '/' +'model.ckpt',
                        global_step=  epoch)
                     self.last_ckpt_num = epoch
-                        #0print("\tb1",  self.parameters.b1.name , self.parameters.b1.eval()[0][0] , sep = "\t")
-                        #print( "W=", sess.run(W1))  # "b=", sess.run(b1)
                 print("Optimization Finished!", file = sys.stderr)
-#                 print("cost = ", sess.run( tot_loss , feed_dict={self.vars.x: train_X, self.vars.y: np.reshape(train_Y, [-1, 1]) }) )
-#                 print("W1 = ", sess.run(self.parameters.W1), )
-#                 print("b1 = ", sess.run(self.parameters.b1) )
         return self
+
+    def get_loss(self, test_xy_loader=None, minibatches=None, load=False):
+        test_batch_getter = test_xy_loader( self.BATCH_SIZE)
+        sess_config = tf.ConfigProto(inter_op_parallelism_threads=self.NUM_CORES,
+                                   intra_op_parallelism_threads= self.NUM_CORES)
+        loss = 0
+        g = tf.Graph()
+        with g.as_default():
+            "fetch a placeholder of the predicted variable"
+            ph_y_predicted = self._create_network()
+            if not ("keep_prob" in self.vars or hasattr( self.vars, "keep_prob") ):
+                self.dropout = 0.0
+            self._loss_ = self._create_loss()
+            summary_op = tf.merge_all_summaries()
+            sess_config = tf.ConfigProto(inter_op_parallelism_threads=self.NUM_CORES,
+                                       intra_op_parallelism_threads= self.NUM_CORES)
+            # Initializing the variables
+            init = tf.initialize_all_variables()
+
+            with tf.Session(config = sess_config) as sess:
+                if load:
+                    self._load_(sess)
+                else:
+                    sess.run(init)
+                for ii, (_x_, _y_) in enumerate(test_batch_getter):
+                    feed_dict={self.vars.x: _x_,
+                               self.vars.y: _y_, self.train_time: False}
+                    loss += sess.run(self._loss_, feed_dict=feed_dict)
+                    if minibatches and (ii>=minibatches):
+                        break
+        return loss
+
 
 
 if __name__ == "__main__":
+    import sqlite3
 
     flags = tf.app.flags
     FLAGS = flags.FLAGS
@@ -325,26 +362,33 @@ if __name__ == "__main__":
     #ydf = pd.read_table(infile, index_col=[0,1], nrows = nrows)
 
     dbpath = dbdir + "batf_disc1.offsets_1000_1.pivot.db"
-    import sqlite3
     conn = sqlite3.connect(dbpath)
 
     from match_dna_atac import get_aligned_batch, get_loader
     #from itertools import cycle
-    train_batchloader = get_loader(conn, where={"chr": "chr21"})
-    test_batchloader = get_loader(conn, where="chr = 'chr22'")
+    train_batchloader = get_loader(conn, where={"chr": "chr21"}, binary=False)
+    test_batchloader = get_loader(conn, where="chr = 'chr22'", binary=False)
 
     #sys.exit(1)
     trainsamples = 4000
 
     "initialize the object"
-    tfl = footprint_poisson(ALPHA = 2e-6,
+    tfl = footprint_poisson(
             BATCH_SIZE = 2**8,
-            dropout = False, xlen = 2001,
+            dropout = 0.43675,
+            xlen = 2001,
             display_step = 100,
-            xdepth = 2,
-            weight_decay = 1e-2,
+            xdepth = 4,
+            weight_decay = 0.02583,
+            conv1_channels = 128,
+            conv2_channels = 32,
+            neg_penalty_const = 0.01,
+            lr = 0.2628,
             )
-    tfl.parameters["neg_penalty_const"] = 0.01
-    tfl.fit( train_xy_loader = train_batchloader, 
+    print(tfl.parameters.keys())
+    tfl.fit( train_xy_loader = train_batchloader,
             test_xy_loader = test_batchloader,
-            performance_set_size=1000)
+            performance_set_size=1000,
+            epochs=1)
+    print(tfl.loss)
+    print(tfl.get_loss(test_batchloader))

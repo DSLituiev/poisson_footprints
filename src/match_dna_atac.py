@@ -13,12 +13,27 @@ def blob_to_quaternary_dna(x):
                 (~y2[0]) & y2[1],
                 y2[0] & (~y2[1]),
                 (~y2[0]) & (~y2[1]),
-                ]
+                ].T
     return y4
 
 def blob_to_int_counts(x):
     return np.asarray(np.fromstring(x, dtype=np.int64), dtype=np.int64)
 
+DNADICT = dict(A = np.r_[True, False, False, False],
+    T = np.r_[False, True, False, False],
+    G = np.r_[False, False, True, False],
+    C = np.r_[False, False, False, True],
+    )
+DNALIST = ["A", "T", "G", "C"]
+
+def int_to_nucleotide(x):
+    return DNALIST[x]
+
+def onehot4_to_dna(x):
+    comparisondim = np.where(np.array(x.shape) == 4)[0][0]
+    ind =  np.argmax(x, axis=comparisondim)
+    xstr = np.vectorize(int_to_nucleotide)(ind)
+    return xstr
 
 def get_bin_seqs(conn, where=None):
     if where not in ("", None):
@@ -26,7 +41,6 @@ def get_bin_seqs(conn, where=None):
             where = " WHERE " + where
         elif type(where) is dict:
             where = " WHERE " + " AND ".join(["{0} = '{1}'".format(kk, vv) for kk,vv in where.items()])
-        #print(where)
     else:
         where = ""
     curs = conn.cursor()
@@ -42,7 +56,9 @@ def get_seq_batch(conn, size = 1, align = None, where=None, binary=True):
     xx = []
     yy = []
     decoder = blob_to_binary_dna if binary else blob_to_quaternary_dna
-    for nn, (chrs, pos, binseq, count_str) in enumerate(get_bin_seqs(conn, where=where)):
+    for nn, (chrs, pos, binseq, count_str) in \
+            enumerate(get_bin_seqs(conn, where=where)):
+        #print(chrs, pos)
         x_ = decoder(binseq)
         y_ = blob_to_int_counts(count_str)
         if align is not None:
@@ -85,8 +101,16 @@ if __name__ == "__main__":
     dbpath = dbdir + "batf_disc1.offsets_1000_1.pivot.db"
     conn = sqlite3.connect(dbpath)
 
-    batchloader = get_loader(conn,)
+    batchloader = get_loader(conn, binary=False)
     bl = batchloader(20)
     x,y = next(bl)
     print("x", x.shape)
     print("y", y.shape)
+
+    print("x", x[0][0].T.shape)
+    print("x", x[0][0].T[:30])
+
+    #onehot4_to_dna = np.vectorize(onehot4_to_dna)
+    #print(onehot4_to_dna(x[0]))
+    print( "".join(onehot4_to_dna(x[0][0])) )
+
