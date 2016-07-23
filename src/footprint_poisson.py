@@ -17,6 +17,13 @@ from tflearn import rtflearn, vardict, batch_norm, summary_dict
 # names of the summaries when visualizing a model.
 TOWER_NAME = 'tower'
 
+
+def poisson_loss(y, log_y_predicted):
+  y_pred_pos = tf.exp(log_y_predicted)
+  poisson_loss = tf.reduce_mean(y_pred_pos - y * log_y_predicted,
+                                name = "poisson_loss")
+  return poisson_loss
+
 def _activation_summary(x):
   """Helper to create summaries for activations.
   Creates a summary that provides a histogram of activations.
@@ -62,7 +69,8 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
     """
     #var = _variable_on_cpu(name, shape,
     #                       tf.truncated_normal_initializer(stddev=stddev))
-    var = tf.get_variable(name, shape, initializer=tf.truncated_normal_initializer(stddev=stddev))
+    var = tf.get_variable(name, shape, initializer=tf.contrib.layers.xavier_initializer())
+            #tf.truncated_normal_initializer(stddev=stddev))
     if wd is not None:
         weight_decay = tf.mul(tf.nn.l2_loss(var), wd, name='weight_loss')
         tf.add_to_collection('losses', weight_decay)
@@ -80,7 +88,8 @@ class footprint_poisson(rtflearn):
         self.vars.y = tf.placeholder("float", shape=[None, self.xlen], name = "y")
 
         self.vars.x = batch_norm(self.vars.x, self.train_time)
-        #tfs, gts = tf.unpack(tf.transpose(self.vars.x), num=2)
+        # Need the batch size for the transpose layers.
+        batch_size = tf.shape(self.vars.x)[0]
 
         # Create Model
         with tf.variable_scope('conv1') as scope:
@@ -98,17 +107,17 @@ class footprint_poisson(rtflearn):
             _activation_summary(conv1)
             conv1 = tf.nn.dropout(conv1, 1-self.dropout)
         # pool1
-        pool1 = tf.nn.max_pool(conv1, ksize=[1, 1, 3, 1], strides=[1, 1, 2, 1],
-                               padding='SAME', name='pool1')
+        #pool1 = tf.nn.max_pool(conv1, ksize=[1, 1, 3, 1], strides=[1, 1, 2, 1],
+        #                       padding='SAME', name='pool1')
         # norm1
-        norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
-                          name='norm1')
+        #norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
+        #                  name='norm1')
         # conv2
         with tf.variable_scope('conv2') as scope:
             kernel = _variable_with_weight_decay('weights',
                                     shape=[1, 5, self.conv1_channels, self.conv2_channels],
                                     stddev=1e-4, wd=conv_wd)
-            conv = tf.nn.conv2d(norm1, kernel, [1, 1, 1, 1], padding='SAME')
+            conv = tf.nn.conv2d(conv1, kernel, [1, 1, 1, 1], padding='SAME')
             #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
             biases = tf.get_variable('biases', [self.conv2_channels],
                                      initializer=tf.constant_initializer(0.1))
@@ -118,29 +127,61 @@ class footprint_poisson(rtflearn):
             _activation_summary(conv2)
             conv2 = tf.nn.dropout(conv2, 1-self.dropout)
         # norm2
-        norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
-                          name='norm2')
+        #norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
+        #                  name='norm2')
         # pool2
-        pool2 = tf.nn.max_pool(norm2, ksize=[1, 1, 3, 1],
-                               strides=[1, 1, 2, 1], padding='SAME', name='pool2')
-        # local3
-        print("pool2", pool2.get_shape())
-        with tf.variable_scope('local3') as scope:
-            # Move everything into depth so we can perform a single matrix multiply.
-            #reshape = tf.reshape(pool2, [FLAGS.batch_size, -1])
-            #dim = reshape.get_shape()[1].value
-            dim =  np.prod(np.array([int(x) for x in pool2.get_shape()[1:]]))
-            print("local3 dim:", dim)
-            reshape = tf.reshape(pool2, [-1, dim])
-            weights = _variable_with_weight_decay('weights', shape=[dim, self.xlen],
-                                                  stddev=0.04, wd=weight_decay)
-            #biases = _variable_on_cpu('biases', [self.xlen], tf.constant_initializer(0.1))
-            biases = tf.get_variable('biases', [self.xlen],
-                                     initializer=tf.constant_initializer(0.1))
-            local3 = tf.nn.relu(tf.matmul(reshape, weights) + biases, name=scope.name)
-            _activation_summary(local3)
+        #pool2 = tf.nn.max_pool(norm2, ksize=[1, 1, 3, 1],
+        #                       strides=[1, 1, 2, 1], padding='SAME', name='pool2')
+        # tconv1 
+        #print("tconv1", pool2.get_shape())
+        with tf.variable_scope('tconv1') as scope:
+            kernel_h = 1
+            kernel_w = 5
+            stride_h = 1
+            stride_w = 1
+            pad_h = 1
+            pad_w = 1
+            self.tconv1_channels = 64
+            kernel = _variable_with_weight_decay('weights',
+                            shape=[kernel_h, kernel_w, self.tconv1_channels, self.conv2_channels],
+                            stddev=1e-4, wd=conv_wd)
+            inpshape = tf.shape(conv2)
+            h = ((inpshape[1] - 1) * stride_h) + kernel_h - 2 * pad_h
+            w = ((inpshape[2] - 1) * stride_w) + kernel_w - 2 * pad_w
+            #output_shape =  [batch_size, h, w, self.xlen]
+            output_shape =  [batch_size, (inpshape[1] + stride_h - 1),
+                                (inpshape[2] + stride_w - 1) , self.tconv1_channels]
+            print(scope.name, output_shape)
+            output_shape = tf.pack(output_shape)
+            tconv1 = tf.nn.conv2d_transpose(conv2, kernel, output_shape, strides=[1,1,1,1],
+                    padding='SAME', name=None)
+            _activation_summary(tconv1)
 
-        self.vars.y_predicted = local3
+        with tf.variable_scope('tconv2') as scope:
+            kernel_h = 1
+            kernel_w = 5
+            stride_h = 1
+            stride_w = 1
+            pad_h = 1
+            pad_w = 1
+            output_channels = 1
+            kernel = _variable_with_weight_decay('weights',
+                            shape=[kernel_h, kernel_w, output_channels, self.tconv1_channels],
+                            stddev=1e-4, wd=conv_wd)
+            inpshape = tf.shape(tconv1)
+            h = ((inpshape[1] - 1) * stride_h) + kernel_h - 2 * pad_h
+            w = ((inpshape[2] - 1) * stride_w) + kernel_w - 2 * pad_w
+            #output_shape =  [batch_size, h, w, self.xlen]
+            output_shape =  [batch_size, (inpshape[1] + stride_h - 1),
+                                (inpshape[2] + stride_w - 1) , output_channels]
+            print(scope.name, output_shape)
+            output_shape = tf.pack(output_shape)
+            tconv2 = tf.nn.conv2d_transpose(tconv1, kernel, output_shape, strides=[1,1,1,1],
+                    padding='SAME', name=None)
+            tconv2 = tf.reshape(tconv2, [-1, self.xlen])
+            _activation_summary(tconv2)
+
+        self.vars.y_predicted = tconv2
         #self.vars.y_predicted = tf.reshape(self.vars.y_predicted, [-1, 1])
 
         #self.vars.y_predicted = gts * 1e-2
@@ -150,27 +191,19 @@ class footprint_poisson(rtflearn):
     def _ydiff(self):
         print( "y_predicted", self.vars.y_predicted.get_shape() )
         print( "y", self.vars.y.get_shape())
-        return self.vars.y_predicted - self.vars.y
+        return tf.exp(self.vars.y_predicted) - self.vars.y
 
     def _create_loss(self):
-        # Minimize the squared errors
         #print("loss")
-        y_pred_pos = tf.nn.relu( self.vars.y_predicted)
-        y_pred_neg_penalty = tf.reduce_mean( tf.nn.relu( - self.vars.y_predicted), name = "neg_penalty")
+        poisson_loss_ = poisson_loss(self.vars.y, self.vars.y_predicted)
+        tf.add_to_collection('losses', poisson_loss_)
 
-        poisson_loss = tf.reduce_mean(tf.abs(y_pred_pos) - self.vars.y * tf.log(1 + tf.abs(y_pred_pos)),
-                                      name = "poisson_loss")
-        tf.add_to_collection('losses', poisson_loss)
-        tf.add_to_collection('losses', self.neg_penalty_const * y_pred_neg_penalty)
-
-        #tf.add_n(tf.get_collection('losses'), name='total_loss')
-        tf.scalar_summary("poisson_loss", poisson_loss )
-        tf.scalar_summary( "neg_penalty", y_pred_neg_penalty )
+        tf.scalar_summary("poisson_loss", poisson_loss_ )
 
         self._loss_ = tf.to_float(self.train_time) * tf.add_n(tf.get_collection('losses'), name='total_loss') +\
-                     tf.to_float(~self.train_time)*poisson_loss
+                    tf.to_float(~self.train_time)*poisson_loss_
 
-        l2_loss = tf.reduce_mean(tf.pow( self.vars.y_predicted - self.vars.y, 2))
+        l2_loss = tf.reduce_mean(tf.pow( tf.exp(self.vars.y_predicted) - self.vars.y, 2))
         tf.scalar_summary( "loss" , self._loss_)
         #tf.scalar_summary( "y[0]" , self.vars.y_predicted[9] )
         #tf.scalar_summary( "y_hat[0]" , self.vars.y[9,0] )
@@ -354,13 +387,7 @@ if __name__ == "__main__":
     summary_path = os.environ.get('SUMMARY_PATH', 'logs/')
 
     "paths to the data sets"
-    pivotdir = "../data/"
     dbdir = "../data/"
-
-    #infile = pivotdir+ "IGTB1077.batf_disc1.offsets_1000_1.pivot.tab"
-    #nrows = None
-    #ydf = pd.read_table(infile, index_col=[0,1], nrows = nrows)
-
     dbpath = dbdir + "batf_disc1.offsets_1000_1.pivot.db"
     conn = sqlite3.connect(dbpath)
 
@@ -389,6 +416,6 @@ if __name__ == "__main__":
     tfl.fit( train_xy_loader = train_batchloader,
             test_xy_loader = test_batchloader,
             performance_set_size=1000,
-            epochs=1)
+            epochs=50)
     print(tfl.loss)
     print(tfl.get_loss(test_batchloader))

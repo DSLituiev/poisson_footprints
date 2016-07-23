@@ -57,7 +57,8 @@ if __name__ == "__main__":
     logfile = "hyperparam.log"
     try:
         os.remove(logfile)
-    except:
+    except Exception as ee:
+        print(ee)
         pass
 
     print("# Loading data")
