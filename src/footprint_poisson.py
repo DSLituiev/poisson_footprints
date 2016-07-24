@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 #######################
 import tensorflow as tf
-from tflearn import rtflearn, vardict, batch_norm, summary_dict
+from tflearn import rtflearn, vardict,  summary_dict, batch_norm
+#from tensorflow.contrib.layers import batch_norm
 
 
 # If a model is trained with multiple GPUs, prefix all Op names with tower_name
@@ -18,8 +19,20 @@ from tflearn import rtflearn, vardict, batch_norm, summary_dict
 TOWER_NAME = 'tower'
 
 
-def poisson_loss(y, log_y_predicted):
+def poisson_loss(y, log_y_predicted, pad=0):
   y_pred_pos = tf.exp(log_y_predicted)
+  vector_loss = y_pred_pos - y * log_y_predicted
+  b = tf.shape(vector_loss,)[0]
+  h = tf.shape(vector_loss,)[1]
+  #w = tf.shape(vector_loss,)[2]
+  #d = tf.shape(vector_loss,)[3]
+
+  if pad!=0:
+      #mask = np.ones(tf.shape(vector_loss,))
+      #mask[:,:,pad:-pad-1,:] = 0
+      #mask = tf.constant(mask, trainable=False)
+      vector_loss = tf.slice(vector_loss,[0,pad],[b,h-pad])
+
   poisson_loss = tf.reduce_mean(y_pred_pos - y * log_y_predicted,
                                 name = "poisson_loss")
   return poisson_loss
@@ -39,6 +52,8 @@ def _activation_summary(x):
   tf.histogram_summary(tensor_name + '/activations', x)
   tf.scalar_summary(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
 
+
+from tensorflow.python import control_flow_ops
 
 def _variable_on_cpu(name, shape, initializer):
     """Helper to create a Variable stored on CPU memory.
@@ -87,7 +102,8 @@ class footprint_poisson(rtflearn):
         self.vars.x = tf.placeholder("float", shape=[None, 1, self.xlen, self.xdepth], name = "x")
         self.vars.y = tf.placeholder("float", shape=[None, self.xlen], name = "y")
 
-        self.vars.x = batch_norm(self.vars.x, self.train_time)
+        self.vars.x = batch_norm(self.vars.x, is_training=self.train_time)
+        print("x placeholder", self.vars.x.get_shape())
         # Need the batch size for the transpose layers.
         batch_size = tf.shape(self.vars.x)[0]
 
@@ -106,6 +122,9 @@ class footprint_poisson(rtflearn):
             print("conv1", conv1.get_shape())
             _activation_summary(conv1)
             conv1 = tf.nn.dropout(conv1, 1-self.dropout)
+            if self.batch_norm:
+                conv1 = batch_norm(conv1,
+                    is_training=self.train_time, n_out=self.conv1_channels, scope=scope)
         # pool1
         #pool1 = tf.nn.max_pool(conv1, ksize=[1, 1, 3, 1], strides=[1, 1, 2, 1],
         #                       padding='SAME', name='pool1')
@@ -120,12 +139,20 @@ class footprint_poisson(rtflearn):
             conv = tf.nn.conv2d(conv1, kernel, [1, 1, 1, 1], padding='SAME')
             #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
             biases = tf.get_variable('biases', [self.conv2_channels],
-                                     initializer=tf.constant_initializer(0.1))
+                                     initializer=tf.constant_initializer(0.01))
             bias = tf.nn.bias_add(conv, biases)
             conv2 = tf.nn.relu(bias, name=scope.name)
             print("conv2", conv2.get_shape())
             _activation_summary(conv2)
             conv2 = tf.nn.dropout(conv2, 1-self.dropout)
+            if self.batch_norm:
+                conv2 = batch_norm(conv2, is_training=self.train_time,
+                               n_out=self.conv2_channels, scope=scope)
+
+        map_sparsity = tf.add(tf.reduce_mean(tf.abs(conv2)),
+                tf.reduce_mean((conv2)**2,)/2,
+                name = "map0_sparsity")
+        tf.add_to_collection('losses', self.sparsity * map_sparsity)
         # norm2
         #norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
         #                  name='norm2')
@@ -141,11 +168,11 @@ class footprint_poisson(rtflearn):
             stride_w = 1
             pad_h = 1
             pad_w = 1
-            self.tconv1_channels = 64
             kernel = _variable_with_weight_decay('weights',
                             shape=[kernel_h, kernel_w, self.tconv1_channels, self.conv2_channels],
                             stddev=1e-4, wd=conv_wd)
             inpshape = tf.shape(conv2)
+            #print(scope.name, "inpshape", inpshape) 
             h = ((inpshape[1] - 1) * stride_h) + kernel_h - 2 * pad_h
             w = ((inpshape[2] - 1) * stride_w) + kernel_w - 2 * pad_w
             #output_shape =  [batch_size, h, w, self.xlen]
@@ -155,7 +182,14 @@ class footprint_poisson(rtflearn):
             output_shape = tf.pack(output_shape)
             tconv1 = tf.nn.conv2d_transpose(conv2, kernel, output_shape, strides=[1,1,1,1],
                     padding='SAME', name=None)
+            #tconv1 = batch_norm(tconv1, is_training=self.train_time,
+            #                    n_out=self.tconv1_channels, scope=scope)
+
             _activation_summary(tconv1)
+
+        map_sparsity = tf.add(tf.reduce_mean(tf.abs(tconv1)),
+                tf.reduce_mean((tconv1)**2,)/2, name ="map1_sparsity")
+        tf.add_to_collection('losses', self.sparsity * map_sparsity)
 
         with tf.variable_scope('tconv2') as scope:
             kernel_h = 1
@@ -166,7 +200,8 @@ class footprint_poisson(rtflearn):
             pad_w = 1
             output_channels = 1
             kernel = _variable_with_weight_decay('weights',
-                            shape=[kernel_h, kernel_w, output_channels, self.tconv1_channels],
+                            shape=[kernel_h, kernel_w,
+                                   output_channels, self.tconv1_channels],
                             stddev=1e-4, wd=conv_wd)
             inpshape = tf.shape(tconv1)
             h = ((inpshape[1] - 1) * stride_h) + kernel_h - 2 * pad_h
@@ -176,8 +211,10 @@ class footprint_poisson(rtflearn):
                                 (inpshape[2] + stride_w - 1) , output_channels]
             print(scope.name, output_shape)
             output_shape = tf.pack(output_shape)
-            tconv2 = tf.nn.conv2d_transpose(tconv1, kernel, output_shape, strides=[1,1,1,1],
+            tconv2 = tf.nn.conv2d_transpose(tconv1, kernel,
+                            output_shape, strides=[1,1,1,1],
                     padding='SAME', name=None)
+            #tconv2 = batch_norm(tconv2, is_training=self.train_time)#, n_out=output_channels, scope=scope)
             tconv2 = tf.reshape(tconv2, [-1, self.xlen])
             _activation_summary(tconv2)
 
@@ -195,7 +232,7 @@ class footprint_poisson(rtflearn):
 
     def _create_loss(self):
         #print("loss")
-        poisson_loss_ = poisson_loss(self.vars.y, self.vars.y_predicted)
+        poisson_loss_ = poisson_loss(self.vars.y, self.vars.y_predicted, pad = 8)
         tf.add_to_collection('losses', poisson_loss_)
 
         tf.scalar_summary("poisson_loss", poisson_loss_ )
@@ -374,7 +411,9 @@ if __name__ == "__main__":
     import sqlite3
 
     flags = tf.app.flags
+    flags.DEFINE_boolean('predict', False, 'If true, predicts')
     FLAGS = flags.FLAGS
+    print(flags.FLAGS)
     FLAGS.batch_size = 128
 
     # define flags (note that Fomoro will not pass any flags by default)
@@ -401,21 +440,51 @@ if __name__ == "__main__":
 
     "initialize the object"
     tfl = footprint_poisson(
+            sparsity = 1e-2,
+            batch_norm = False,
             BATCH_SIZE = 2**8,
-            dropout = 0.43675,
+            dropout = 0.5,
             xlen = 2001,
             display_step = 100,
             xdepth = 4,
             weight_decay = 0.02583,
             conv1_channels = 128,
             conv2_channels = 32,
-            neg_penalty_const = 0.01,
-            lr = 0.2628,
+            tconv1_channels = 32,
+            lr = 0.01,
             )
     print(tfl.parameters.keys())
-    tfl.fit( train_xy_loader = train_batchloader,
-            test_xy_loader = test_batchloader,
-            performance_set_size=1000,
-            epochs=50)
-    print(tfl.loss)
-    print(tfl.get_loss(test_batchloader))
+    if not FLAGS.predict:
+        tfl.fit( train_xy_loader = train_batchloader,
+                test_xy_loader = test_batchloader,
+                performance_set_size=1000,
+                epochs=50)
+        print(tfl.loss)
+        print(tfl.get_loss(test_batchloader))
+    else:
+        print("predicting")
+        testbl = test_batchloader(1)
+        for nn, (xx, yy) in enumerate(testbl):
+            print(nn)
+            yhat = tfl.predict(xx)
+            tt = np.arange(len(yhat[0]))
+
+            print("xx", xx.shape)
+            print("yy", yy[0].shape)
+            print("yhat", yhat.shape)
+            print("tt", tt.shape)
+            print(yy[0]>0)
+            print( (yy[0]>0).shape )
+
+            fig, axs = plt.subplots(2)
+            axs[0].plot(tt, np.exp(yhat[0]), c="b", zorder=1 )
+            #axs[0].set_xlim([0, np.exp(max(yhat[0]))+0.01 ])
+            for t_ in tt[ yy[0]>0 ]:
+                axs[0].axvline(t_, c='r')
+            #ax.scatter(tt, yy[0],c=(1,0,0,1), edgecolors="none", zorder=2 )
+            axs[1].stem(tt, yy[0],markerfmt='ro',linefmt='r-',
+                        edgecolors="none", zorder=2 )
+            #axs[1].set_xlim([0, max(yy[0]+1)])
+            fig.savefig("pred_%u.eps" % nn, format="eps")
+            fig.clear()
+

@@ -22,20 +22,23 @@ from match_dna_atac import get_aligned_batch, get_loader
 import sqlite3
 
 
-CONV1_CHANNELS = [64, 128]
+CONV1_CHANNELS = [128, 256]
 CONV2_CHANNELS = [16, 32]
+TCONV1_CHANNELS = [16, 32]
 
-def get_model(model, lr, wd, dropout,
-        conv1_channels_ind, conv2_channels_ind,
+def get_model(model, lr, wd,
+        batch_norm,
+        conv1_channels_ind, conv2_channels_ind, tconv1_channels_ind,
         BATCH_SIZE=2**8,
         beta1=0.9, beta2=0.999, epsilon=1e-08):
     common_opts = dict(
+                batch_norm = np.array([False,True],dtype=bool)[batch_norm],
                 epochs = 1,
-                neg_penalty_const = 0.01,
                 BATCH_SIZE = BATCH_SIZE,
                 conv1_channels = CONV1_CHANNELS[conv1_channels_ind],
                 conv2_channels = CONV2_CHANNELS[conv2_channels_ind],
-                dropout = dropout,
+                tconv1_channels = TCONV1_CHANNELS[tconv1_channels_ind],
+                dropout = 0.5,
                 xlen = 2001,
                 display_step = 100,
                 xdepth = 4,
@@ -73,9 +76,10 @@ if __name__ == "__main__":
 
     common_opts = [hp.loguniform('lr', np.log(0.05), np.log(0.3)),
                       hp.loguniform('wd', np.log(0.001), np.log(0.03)),
-                      hp.uniform('dropout', 0.37, 0.6),
+                      hp.choice('batch_norm', [False, True]),
                       hp.choice('conv2_channels_ind', CONV1_CHANNELS),
-                      hp.choice('conv1_channels_ind', CONV2_CHANNELS)]
+                      hp.choice('conv1_channels_ind', CONV2_CHANNELS),
+                      hp.choice('tconv1_channels_ind', TCONV1_CHANNELS)]
 
     adam_opts = [ hp.loguniform("epsilon", -12, -6),
                   hp.uniform('beta1', 0, 1-1e-4),
