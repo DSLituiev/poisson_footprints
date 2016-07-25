@@ -18,10 +18,32 @@ from tflearn import rtflearn, vardict,  summary_dict, batch_norm
 # names of the summaries when visualizing a model.
 TOWER_NAME = 'tower'
 
+def diff(x, axis=-1):
+    xsh = x.get_shape()
+    xsh = np.r_[[int(c) for c in xsh]]
+    begin = np.zeros(len(xsh),dtype=np.int32)
+    begin[axis] = 1
+    y = tf.slice(x, begin=begin, size=[-1,]*len(xsh)) -\
+        tf.slice(x, [0,]*len(xsh), xsh-begin)
+    return y
+
+def softmax(target, axis, name=None):
+    """
+    Multi dimensional softmax,
+    refer to https://github.com/tensorflow/tensorflow/issues/210
+    compute softmax along the dimension of target
+    the native softmax only supports batch_size x dimension
+    """
+    with tf.op_scope([target], name, 'softmax'):
+        max_axis = tf.reduce_max(target, axis, keep_dims=True)
+        target_exp = tf.exp(target-max_axis)
+        normalize = tf.reduce_sum(target_exp, axis, keep_dims=True)
+        softmax = target_exp / normalize
+    return softmax
 
 def poisson_loss(y, log_y_predicted, pad=0):
   y_pred_pos = tf.exp(log_y_predicted)
-  vector_loss = y_pred_pos - y * log_y_predicted
+  vector_loss = y_pred_pos - y * log_y_predicted + tf.lgamma(y+1)
   b = tf.shape(vector_loss,)[0]
   h = tf.shape(vector_loss,)[1]
   #w = tf.shape(vector_loss,)[2]
@@ -66,6 +88,29 @@ def _variable_on_cpu(name, shape, initializer):
     """
     with tf.device('/cpu:0'):
        var = tf.get_variable(name, shape, initializer=initializer)
+    return var
+
+def smooth_filter(name, shape, stddev, wd, axis=1):
+    """Helper to create an initialized Variable with weight decay.
+    Note that the Variable is initialized with a truncated normal distribution.
+    A weight decay is added only if one is specified.
+    Args:
+      name: name of the variable
+      shape: list of ints
+      stddev: standard deviation of a truncated Gaussian
+      wd: add L2Loss weight decay multiplied by this float. If None, weight
+          decay is not added for this Variable.
+    Returns:
+      Variable Tensor
+    """
+    #var = _variable_on_cpu(name, shape,
+    #                       tf.truncated_normal_initializer(stddev=stddev))
+    var = tf.get_variable(name, shape, initializer=tf.contrib.layers.xavier_initializer())
+            #tf.truncated_normal_initializer(stddev=stddev))
+    if wd is not None:
+        sqd = tf.reduce_mean( diff(var,axis=axis)**2 )/2
+        weight_decay = tf.mul(sqd, wd, name='smoothness_loss')
+        tf.add_to_collection('losses', weight_decay)
     return var
 
 
@@ -120,11 +165,12 @@ class footprint_poisson(rtflearn):
             bias = tf.nn.bias_add(conv, biases)
             conv1 = tf.nn.relu(bias, name=scope.name)
             print("conv1", conv1.get_shape())
-            _activation_summary(conv1)
-            conv1 = tf.nn.dropout(conv1, 1-self.dropout)
+            #conv1 = tf.nn.dropout(conv1, 1-self.dropout)
             if self.batch_norm:
                 conv1 = batch_norm(conv1,
                     is_training=self.train_time, n_out=self.conv1_channels, scope=scope)
+            conv1 = softmax(conv1,2)
+            _activation_summary(conv1)
         # pool1
         #pool1 = tf.nn.max_pool(conv1, ksize=[1, 1, 3, 1], strides=[1, 1, 2, 1],
         #                       padding='SAME', name='pool1')
@@ -134,7 +180,7 @@ class footprint_poisson(rtflearn):
         # conv2
         with tf.variable_scope('conv2') as scope:
             kernel = _variable_with_weight_decay('weights',
-                                    shape=[1, 5, self.conv1_channels, self.conv2_channels],
+                                    shape=[1, 3, self.conv1_channels, self.conv2_channels],
                                     stddev=1e-4, wd=conv_wd)
             conv = tf.nn.conv2d(conv1, kernel, [1, 1, 1, 1], padding='SAME')
             #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
@@ -149,10 +195,33 @@ class footprint_poisson(rtflearn):
                 conv2 = batch_norm(conv2, is_training=self.train_time,
                                n_out=self.conv2_channels, scope=scope)
 
-        map_sparsity = tf.add(tf.reduce_mean(tf.abs(conv2)),
-                tf.reduce_mean((conv2)**2,)/2,
-                name = "map0_sparsity")
-        tf.add_to_collection('losses', self.sparsity * map_sparsity)
+        with tf.variable_scope('conv3') as scope:
+            kernel = smooth_filter('weights',
+                                    shape=[1, 11, self.conv1_channels, self.conv2_channels],
+                                    stddev=1e-4, wd=conv_wd,
+                                    axis=2)
+            conv3 = tf.nn.conv2d(conv1, kernel, [1, 1, 1, 1], padding='SAME')
+            #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
+            biases = tf.get_variable('biases', [self.conv2_channels],
+                                     initializer=tf.constant_initializer(0.01))
+            bias = tf.nn.bias_add(conv, biases)
+            conv3 = tf.nn.relu(bias, name=scope.name)
+            print(scope.name, conv3.get_shape())
+            _activation_summary(conv3)
+            conv3 = tf.nn.dropout(conv2, 1-self.dropout)
+            if self.batch_norm:
+                conv3 = batch_norm(conv3, is_training=self.train_time,
+                               n_out=self.conv2_channels, scope=scope)
+
+
+        gate_2_3 = tf.Variable(tf.constant([0.5,0.5], dtype=np.float32), name="gate_2_3")
+        gate_2_3 = gate_2_3/tf.reduce_sum(gate_2_3)
+        conv_2_3 = conv2*gate_2_3[0] + conv3*gate_2_3[1]
+            #conv2 = softmax(conv2, 2)
+        #map_sparsity = tf.add(tf.reduce_mean(tf.abs(conv2)),
+        #        tf.reduce_mean((conv2)**2,)/2,
+        #        name = "map0_sparsity")
+        #tf.add_to_collection('losses', self.sparsity * map_sparsity)
         # norm2
         #norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
         #                  name='norm2')
@@ -187,9 +256,9 @@ class footprint_poisson(rtflearn):
 
             _activation_summary(tconv1)
 
-        map_sparsity = tf.add(tf.reduce_mean(tf.abs(tconv1)),
-                tf.reduce_mean((tconv1)**2,)/2, name ="map1_sparsity")
-        tf.add_to_collection('losses', self.sparsity * map_sparsity)
+        #map_sparsity = tf.add(tf.reduce_mean(tf.abs(tconv1)),
+        #        tf.reduce_mean((tconv1)**2,)/2, name ="map1_sparsity")
+        #tf.add_to_collection('losses', self.sparsity * map_sparsity)
 
         with tf.variable_scope('tconv2') as scope:
             kernel_h = 1
@@ -451,7 +520,7 @@ if __name__ == "__main__":
             conv1_channels = 128,
             conv2_channels = 32,
             tconv1_channels = 32,
-            lr = 0.01,
+            lr = 0.1,
             )
     print(tfl.parameters.keys())
     if not FLAGS.predict:
@@ -465,6 +534,21 @@ if __name__ == "__main__":
         print("predicting")
         testbl = test_batchloader(1)
         for nn, (xx, yy) in enumerate(testbl):
+            tfl = footprint_poisson(
+                    sparsity = 1e-2,
+                    batch_norm = False,
+                    BATCH_SIZE = 2**8,
+                    dropout = 0.5,
+                    xlen = 2001,
+                    display_step = 100,
+                    xdepth = 4,
+                    weight_decay = 0.02583,
+                    conv1_channels = 128,
+                    conv2_channels = 32,
+                    tconv1_channels = 32,
+                    lr = 0.1,
+                    )
+
             print(nn)
             yhat = tfl.predict(xx)
             tt = np.arange(len(yhat[0]))
