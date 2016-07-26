@@ -501,7 +501,7 @@ if __name__ == "__main__":
 
     from match_dna_atac import get_aligned_batch, get_loader
     #from itertools import cycle
-    train_batchloader = get_loader(conn, where={"chr": "chr21"}, binary=False)
+    train_batchloader = get_loader(conn, where={"chr": "chr9"}, binary=False)
     test_batchloader = get_loader(conn, where="chr = 'chr22'", binary=False)
 
     #sys.exit(1)
@@ -532,42 +532,53 @@ if __name__ == "__main__":
         print(tfl.get_loss(test_batchloader))
     else:
         print("predicting")
-        testbl = test_batchloader(1)
-        for nn, (xx, yy) in enumerate(testbl):
-            tfl = footprint_poisson(
-                    sparsity = 1e-2,
-                    batch_norm = False,
-                    BATCH_SIZE = 2**8,
-                    dropout = 0.5,
-                    xlen = 2001,
-                    display_step = 100,
-                    xdepth = 4,
-                    weight_decay = 0.02583,
-                    conv1_channels = 128,
-                    conv2_channels = 32,
-                    tconv1_channels = 32,
-                    lr = 0.1,
-                    )
+        testbl = test_batchloader(500)
+        yhat_list = []
+        y_list = []
+        try:
+            for nn, (xx, yy) in enumerate(testbl):
+                tfl = footprint_poisson(
+                        sparsity = 1e-2,
+                        batch_norm = False,
+                        BATCH_SIZE = 2**8,
+                        dropout = 0.5,
+                        xlen = 2001,
+                        display_step = 100,
+                        xdepth = 4,
+                        weight_decay = 0.02583,
+                        conv1_channels = 128,
+                        conv2_channels = 32,
+                        tconv1_channels = 32,
+                        lr = 0.1,
+                        )
 
-            print(nn)
-            yhat = tfl.predict(xx)
-            tt = np.arange(len(yhat[0]))
+                print(nn)
+                yhat = tfl.predict(xx)
+                yhat_list.append(yhat)
+                y_list.append(yy)
+                break
+        finally:
+            tt = np.arange(len(yhat[0])) - 1000
 
-            print("xx", xx.shape)
-            print("yy", yy[0].shape)
-            print("yhat", yhat.shape)
-            print("tt", tt.shape)
-            print(yy[0]>0)
-            print( (yy[0]>0).shape )
-
+            valid = abs(tt) < 50
+            yhat_mean = np.mean(np.mean(np.stack(yhat_list), axis=0), axis=0 )
+            print("yhat_mean", yhat_mean.shape)
+            yhat_var = np.mean(np.var( np.exp(np.stack(yhat_list)), axis=0 ), axis=0)
+            y_mean = np.mean(np.mean( np.stack(y_list), axis=0 ), axis=0)
+            print("y_mean", y_mean.shape)
+            print(yhat_var.shape)
             fig, axs = plt.subplots(2)
-            axs[0].plot(tt, np.exp(yhat[0]), c="b", zorder=1 )
+            axs[0].plot(tt[valid], np.exp(yhat_mean[valid]), c="b", zorder=1, lw=2 )
+            axs[0].plot(tt[valid], (yhat_var[valid]), c="g", zorder=2 )
+            axs[0].set_ylim(np.exp(np.r_[ min(yhat_mean[valid]), max(yhat_mean[valid]) ]))
+            print(min(yhat_var[valid]), max(yhat_var[valid]))
             #axs[0].set_xlim([0, np.exp(max(yhat[0]))+0.01 ])
-            for t_ in tt[ yy[0]>0 ]:
-                axs[0].axvline(t_, c='r')
+            #for t_ in tt[ (y_mean>0) & valid]:
+            #    axs[0].axvline(t_, c='r')
             #ax.scatter(tt, yy[0],c=(1,0,0,1), edgecolors="none", zorder=2 )
-            axs[1].stem(tt, yy[0],markerfmt='ro',linefmt='r-',
-                        edgecolors="none", zorder=2 )
+            axs[1].plot(tt[valid], y_mean[valid], c='r')
+            #axs[1].stem(tt[valid], y_mean[valid], markerfmt='ro',linefmt='r-',
+            #            edgecolors="none", zorder=2 )
             #axs[1].set_xlim([0, max(yy[0]+1)])
             fig.savefig("pred_%u.eps" % nn, format="eps")
             fig.clear()
