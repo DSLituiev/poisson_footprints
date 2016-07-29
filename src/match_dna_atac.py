@@ -35,7 +35,7 @@ def onehot4_to_dna(x):
     xstr = np.vectorize(int_to_nucleotide)(ind)
     return xstr
 
-def get_bin_seqs(conn, where=None):
+def get_bin_seqs(conn, where=None, tablename="batf_seq_dna_atac"):
     if where not in ("", None):
         if type(where) is str:
             where = " WHERE " + where
@@ -44,7 +44,7 @@ def get_bin_seqs(conn, where=None):
     else:
         where = ""
     curs = conn.cursor()
-    curs.execute("SELECT * from IGTB1077_seq" + where)
+    curs.execute(" ".join(["SELECT * from", tablename, where]))
     while True:
         dna_row = curs.fetchone()
         if dna_row is None:
@@ -88,7 +88,11 @@ def get_aligned_batch(conn, size = 10, where=None, binary=True):
 from functools import partial
 
 def get_loader(conn, where=None, binary=True):
-    return partial(get_aligned_batch, conn, where=where, binary=binary)
+    out = partial(get_aligned_batch, conn, where=where, binary=binary)
+    out.__repr__ = """loader:
+    sql:    {0}
+    binary: {1}""".format(where, binary)
+    return out
 
 
 if __name__ == "__main__":

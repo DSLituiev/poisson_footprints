@@ -397,16 +397,16 @@ class footprint_poisson(rtflearn):
                     "Display logs once in `display_step` epochs"
 
                     train_batch_getter = train_xy_loader( self.BATCH_SIZE)
+                    _sets_ = {"train": train_batch_getter}
+                    #print("self.BATCH_SIZE", self.BATCH_SIZE)
                     if test_xy_loader is not None:
                         test_batch_getter = test_xy_loader( self.BATCH_SIZE)
-
-                    _sets_ = {"train": train_batch_getter}
-                    if test_xy_loader is not None:
                         _sets_["test"] = test_batch_getter
+
                     summaries = {}
                     summaries_plainstr = []
 
-                    for _set_, _xy_   in _sets_.items():
+                    for _set_, _xy_ in _sets_.items():
                         #print("set:", _set_)
                         (_x_, _y_) = next(_xy_)
                         if len(_y_.shape) == 1:
@@ -496,12 +496,12 @@ if __name__ == "__main__":
 
     "paths to the data sets"
     dbdir = "../data/"
-    dbpath = dbdir + "batf_disc1.offsets_1000_1.pivot.db"
+    dbpath = dbdir + "batf_disc1_gw.db"
     conn = sqlite3.connect(dbpath)
 
     from match_dna_atac import get_aligned_batch, get_loader
     #from itertools import cycle
-    train_batchloader = get_loader(conn, where={"chr": "chr9"}, binary=False)
+    train_batchloader = get_loader(conn, where={"chr": "chr20"}, binary=False)
     test_batchloader = get_loader(conn, where="chr = 'chr22'", binary=False)
 
     #sys.exit(1)
@@ -511,8 +511,8 @@ if __name__ == "__main__":
     tfl = footprint_poisson(
             sparsity = 1e-2,
             batch_norm = False,
-            BATCH_SIZE = 2**8,
-            dropout = 0.5,
+            BATCH_SIZE = 2**7,
+            dropout = 0.25,
             xlen = 2001,
             display_step = 100,
             xdepth = 4,
@@ -520,14 +520,14 @@ if __name__ == "__main__":
             conv1_channels = 128,
             conv2_channels = 32,
             tconv1_channels = 32,
-            lr = 0.1,
+            lr = 0.05,
             )
     print(tfl.parameters.keys())
     if not FLAGS.predict:
         tfl.fit( train_xy_loader = train_batchloader,
                 test_xy_loader = test_batchloader,
                 performance_set_size=1000,
-                epochs=50)
+                epochs=250)
         print(tfl.loss)
         print(tfl.get_loss(test_batchloader))
     else:
@@ -549,7 +549,7 @@ if __name__ == "__main__":
                         conv1_channels = 128,
                         conv2_channels = 32,
                         tconv1_channels = 32,
-                        lr = 0.1,
+                        lr = 0.02,
                         )
 
                 print(nn)
