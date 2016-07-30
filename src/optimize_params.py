@@ -24,12 +24,14 @@ import sqlite3
 
 CONV1_CHANNELS = [128, 256]
 CONV2_CHANNELS = [16, 32]
-TCONV1_CHANNELS = [16, 32]
+CONV3_CHANNELS = [16, 32]
+
+BATCH_SIZES=2**np.r_[6,7,8]
 
 def get_model(model, lr, wd,
         batch_norm,
-        conv1_channels_ind, conv2_channels_ind, tconv1_channels_ind,
-        BATCH_SIZE=2**8,
+        conv1_channels_ind, conv2_channels_ind, conv3_channels_ind,
+        batch_size_ind,
         beta1=0.9, beta2=0.999, epsilon=1e-08):
     common_opts = dict(
                 batch_norm = np.array([False,True],dtype=bool)[batch_norm],
@@ -38,6 +40,7 @@ def get_model(model, lr, wd,
                 conv1_channels = CONV1_CHANNELS[conv1_channels_ind],
                 conv2_channels = CONV2_CHANNELS[conv2_channels_ind],
                 tconv1_channels = TCONV1_CHANNELS[tconv1_channels_ind],
+                BATCH_SIZE=BATCH_SIZES[batch_size_ind],
                 dropout = 0.5,
                 xlen = 2001,
                 display_step = 100,
@@ -77,9 +80,10 @@ if __name__ == "__main__":
     common_opts = [hp.loguniform('lr', np.log(0.05), np.log(0.3)),
                       hp.loguniform('wd', np.log(0.001), np.log(0.03)),
                       hp.choice('batch_norm', [False, True]),
-                      hp.choice('conv2_channels_ind', CONV1_CHANNELS),
-                      hp.choice('conv1_channels_ind', CONV2_CHANNELS),
-                      hp.choice('tconv1_channels_ind', TCONV1_CHANNELS)]
+                      hp.choice('batch_size_ind', BATCH_SIZES),
+                      hp.choice('conv1_channels_ind', CONV1_CHANNELS),
+                      hp.choice('conv2_channels_ind', CONV2_CHANNELS),
+                      hp.choice('conv3_channels_ind', CONV3_CHANNELS)]
 
     adam_opts = [ hp.loguniform("epsilon", -12, -6),
                   hp.uniform('beta1', 0, 1-1e-4),
