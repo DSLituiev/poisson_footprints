@@ -1,5 +1,6 @@
-import numpy as np
+import sys
 import sqlite3
+import numpy as np
 import pandas as pd
 
 def blob_to_binary_dna(x):
@@ -35,12 +36,69 @@ def onehot4_to_dna(x):
     xstr = np.vectorize(int_to_nucleotide)(ind)
     return xstr
 
+def count_rows(conn, tablename="batf_seq_dna_atac"):
+    qry = "SELECT MAX(ROWID) FROM {0}".format(tablename)
+    curs = conn.cursor()
+    curs.execute(qry)
+    return curs.fetchone()[0]
+
+def get_bin_seq_random(conn, tablename="batf_seq_dna_atac", fraction = 1/2, num=1):
+    """set negative fraction to pick elements from the end of the table"""
+    nrows = count_rows(conn, tablename)
+    total = int(nrows * abs(fraction))
+    if fraction > 0:
+        start = 0
+    else:
+        start = int(nrows * (1+fraction))
+    # x = random % total + start
+    qry="""SELECT * FROM {tablename}
+        WHERE ROWID IN
+            (SELECT ABS(RANDOM()) % {total} + {start}
+            FROM {tablename} );""".\
+            format(tablename=tablename,
+                   start=start, total=total)
+    #LIMIT {num}
+    curs = conn.cursor()
+    curs.execute(qry)
+    while True:
+        dna_row = curs.fetchone()
+        if dna_row is None:
+            raise StopIteration
+        #chrs, pos, binseq, count_str  =
+        yield dna_row
+
+def get_seq_batch_random(conn, size = 1, align = None,
+                         tablename="batf_seq_dna_atac", fraction = 1/2,
+                         binary=True):
+    xx = []
+    yy = []
+    fetcher = get_bin_seq_random(conn, tablename=tablename, fraction = fraction, num=1)
+    decoder = blob_to_binary_dna if binary else blob_to_quaternary_dna
+    for nn, (chrs, pos, binseq, count_str) in \
+            enumerate(fetcher):
+        #print(chrs, pos, file=sys.stderr)
+        x_ = decoder(binseq)
+        y_ = blob_to_int_counts(count_str)
+        if align is not None:
+            x_, y_ = align(x_, y_)
+        xx.append(x_)
+        yy.append(y_)
+        if ((nn+1) % size) == 0:
+            yield (np.transpose(
+                       np.expand_dims(np.stack(xx), axis=0),
+                       (1,0,3,2)),
+                  np.stack(yy) )
+            xx = []
+            yy = []
+
+
 def get_bin_seqs(conn, where=None, tablename="batf_seq_dna_atac"):
     if where not in ("", None):
         if type(where) is str:
             where = " WHERE " + where
         elif type(where) is dict:
-            where = " WHERE " + " AND ".join(["{0} = '{1}'".format(kk, vv) for kk,vv in where.items()])
+            where = " WHERE " +\
+                    " AND ".join(["{0} = '{1}'".format(kk, vv) for kk,vv in where.items()])
     else:
         where = ""
     curs = conn.cursor()
@@ -79,16 +137,17 @@ def align_shapes(X, y):
     end = X.shape[-1] - start + 1
     return X[:,start:end], y
 
-
-def get_aligned_batch(conn, size = 10, where=None, binary=True):
-    for X, y in get_seq_batch(conn, size = size, align=align_shapes,
-            where=where, binary=binary):
-        yield (X, y)
-
 from functools import partial
 
-def get_loader(conn, where=None, binary=True):
-    out = partial(get_aligned_batch, conn, where=where, binary=binary)
+def get_loader(conn, where=None, binary=True, fraction=0.0,
+                                         tablename="batf_seq_dna_atac",):
+    #out = partial(get_aligned_batch, conn, where=where, binary=binary)
+    if (where is None) and (fraction != 0.0):
+        out = partial(get_seq_batch_random, conn, align=align_shapes,
+                      fraction=fraction, binary=binary)
+    else:
+        out = partial(get_seq_batch, conn, align=align_shapes,
+                      where=where, binary=binary)
     out.__repr__ = """loader:
     sql:    {0}
     binary: {1}""".format(where, binary)
