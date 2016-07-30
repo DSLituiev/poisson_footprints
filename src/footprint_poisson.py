@@ -170,7 +170,7 @@ class footprint_poisson(rtflearn):
         self.vars.x = tf.placeholder("float", shape=[None, 1, self.xlen, self.xdepth], name = "x")
         self.vars.y = tf.placeholder("float", shape=[None, self.xlen], name = "y")
 
-        self.vars.x = batch_norm(self.vars.x, is_training=self.train_time)
+        #self.vars.x = batch_norm(self.vars.x, is_training=self.train_time)
         print("x placeholder", self.vars.x.get_shape())
         # Need the batch size for the transpose layers.
         batch_size = tf.shape(self.vars.x)[0]
@@ -454,7 +454,8 @@ if __name__ == "__main__":
 
     flags = tf.app.flags
     flags.DEFINE_boolean('predict', False, 'If true, predicts')
-    flags.DEFINE_string('CHECKPOINT_PATH',"checkpoints/" , 'If true, predicts')
+    flags.DEFINE_string('checkpoints',"checkpoints/" , 'If true, predicts')
+    flags.DEFINE_string('logdir',"logs/" , 'If true, predicts')
     FLAGS = flags.FLAGS
     print(flags.FLAGS)
     FLAGS.batch_size = 128
@@ -466,18 +467,22 @@ if __name__ == "__main__":
     # define artifact directories where results from the session can be saved
     model_path = os.environ.get('MODEL_PATH', 'models/')
     #checkpoint_path = os.environ.get('CHECKPOINT_PATH', 'checkpoints/')
-    checkpoint_path = flags.FLAGS.CHECKPOINT_PATH
-    summary_path = os.environ.get('SUMMARY_PATH', 'logs/')
+    checkpoint_path = flags.FLAGS.checkpoints
+    summary_path = flags.FLAGS.logdir
+    #summary_path = os.environ.get('SUMMARY_PATH', 'logs/')
 
     "paths to the data sets"
     dbdir = "../data/"
     dbpath = dbdir + "batf_disc1_gw.db"
     conn = sqlite3.connect(dbpath)
 
-    from match_dna_atac import get_aligned_batch, get_loader
+    from match_dna_atac import get_loader # get_aligned_batch
     #from itertools import cycle
-    train_batchloader = get_loader(conn, where={"chr": "chr21"}, binary=False)
-    test_batchloader = get_loader(conn, where="chr = 'chr22'", binary=False)
+    #train_batchloader = get_loader(conn, where={"chr": "chr20"}, binary=False)
+    #test_batchloader = get_loader(conn, where="chr = 'chr22'", binary=False)
+
+    train_batchloader = get_loader(conn, fraction= -1/16, binary=False)
+    test_batchloader  = get_loader(conn, fraction=  1/32, binary=False)
 
     #sys.exit(1)
     trainsamples = 4000
@@ -487,7 +492,7 @@ if __name__ == "__main__":
             sparsity = 1e-2,
             batch_norm = False,
             BATCH_SIZE = 2**8,
-            dropout = 0.5,
+            dropout = 0.25,
             xlen = 2001,
             display_step = 100,
             xdepth = 4,
@@ -496,13 +501,15 @@ if __name__ == "__main__":
             conv2_channels = 32,
             conv3_channels = 8,
             lr = 0.01,
+            checkpoint_dir = flags.FLAGS.checkpoints,
+            logdir = flags.FLAGS.logdir,
             )
     print(tfl.parameters.keys())
     if not FLAGS.predict:
         tfl.fit( train_xy_loader = train_batchloader,
                 test_xy_loader = test_batchloader,
                 performance_set_size=1000,
-                epochs=250)
+                epochs=5000)
         print(tfl.loss)
         print(tfl.get_loss(test_batchloader))
     else:
@@ -525,10 +532,11 @@ if __name__ == "__main__":
             valid = abs(tt) < 50
             yhat_mean = np.mean(np.mean(np.stack(yhat_list), axis=0), axis=0 )
             print("yhat_mean", yhat_mean.shape)
-            yhat_var = np.mean(np.var( np.exp(np.stack(yhat_list)), axis=0 ), axis=0)
+            yhat_var = np.var(np.var( np.exp(np.stack(yhat_list)), axis=0 ), axis=0)
             y_mean = np.mean(np.mean( np.stack(y_list), axis=0 ), axis=0)
-            print("y_mean", y_mean.shape)
+            #print("y_mean", y_mean.shape)
             print(yhat_var.shape)
+            print(yhat_var[:10])
             fig, axs = plt.subplots(2)
             axs[0].plot(tt[valid], np.exp(yhat_mean[valid]), ".-", c="b", zorder=1, lw=1.2 )
             axs[0].plot(tt[valid], (yhat_var[valid]), ".-", c="g", )
