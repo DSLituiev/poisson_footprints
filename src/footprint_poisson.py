@@ -136,6 +136,29 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
         tf.add_to_collection('losses', weight_decay)
     return var
 
+def conv_layer(inp, width, depth, conv_wd,
+        dropout = 0, batch_norm = False,
+        name = "convx"):
+    with tf.variable_scope(name) as scope:
+        input_depth = inp.get_shape()[-1]
+        kernel = _variable_with_weight_decay('weights',
+                    shape=[1, width, input_depth, depth],
+                    stddev=1e-4, wd=conv_wd)
+        conv = tf.nn.conv2d(inp, kernel, [1, 1, 1, 1], padding='SAME')
+        biases = tf.get_variable('biases', [depth],
+                                 initializer=tf.constant_initializer(0.01))
+        bias = tf.nn.bias_add(conv, biases)
+
+        conv2 = tf.nn.softplus(bias, name=scope.name)
+        print(scope.name, conv2.get_shape())
+        _activation_summary(conv2)
+        conv2 = tf.nn.dropout(conv2, 1-dropout)
+        if batch_norm:
+            conv2 = batch_norm(conv2, is_training=self.train_time,
+                           n_out=depth, scope=scope)
+        return conv2
+
+
 class footprint_poisson(rtflearn):
     def _create_network(self):
         #print("conv1_channels", self.conv1_channels)
@@ -178,56 +201,27 @@ class footprint_poisson(rtflearn):
         #norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
         #                  name='norm1')
         # conv2
-        with tf.variable_scope('conv2') as scope:
-            kernel = _variable_with_weight_decay('weights',
-                                    shape=[1, 3, self.conv1_channels, self.conv2_channels],
-                                    stddev=1e-4, wd=conv_wd)
-            conv = tf.nn.conv2d(conv1, kernel, [1, 1, 1, 1], padding='SAME')
-            #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
-            biases = tf.get_variable('biases', [self.conv2_channels],
-                                     initializer=tf.constant_initializer(0.01))
-            bias = tf.nn.bias_add(conv, biases)
-            conv2 = tf.nn.relu(bias, name=scope.name)
-            print("conv2", conv2.get_shape())
-            _activation_summary(conv2)
-            conv2 = tf.nn.dropout(conv2, 1-self.dropout)
-            if self.batch_norm:
-                conv2 = batch_norm(conv2, is_training=self.train_time,
-                               n_out=self.conv2_channels, scope=scope)
+        conv2 = conv_layer(conv1, width=3, depth=self.conv2_channels,
+                conv_wd = conv_wd, name = "conv2",
+                batch_norm = self.batch_norm,
+                dropout=self.dropout)
 
-        with tf.variable_scope('conv3') as scope:
-            kernel = smooth_filter('weights',
-                                    shape=[1, 11, self.conv1_channels, self.conv2_channels],
-                                    stddev=1e-4, wd=conv_wd,
-                                    axis=2)
-            conv3 = tf.nn.conv2d(conv1, kernel, [1, 1, 1, 1], padding='SAME')
-            #biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
-            biases = tf.get_variable('biases', [self.conv2_channels],
-                                     initializer=tf.constant_initializer(0.01))
-            bias = tf.nn.bias_add(conv, biases)
-            conv3 = tf.nn.relu(bias, name=scope.name)
-            print(scope.name, conv3.get_shape())
-            _activation_summary(conv3)
-            conv3 = tf.nn.dropout(conv2, 1-self.dropout)
-            if self.batch_norm:
-                conv3 = batch_norm(conv3, is_training=self.train_time,
-                               n_out=self.conv2_channels, scope=scope)
+        conv3 = conv_layer(conv2, width=3, depth=self.conv3_channels,
+                conv_wd = conv_wd, name = "conv3",
+                batch_norm = self.batch_norm,
+                dropout=self.dropout)
 
+        """
+        conv_shortcut = conv_layer(conv1, width=5, depth=self.conv3_channels,
+                conv_wd = conv_wd, name = "conv3",
+                batch_norm = self.batch_norm,
+                dropout=self.dropout)
 
-        gate_2_3 = tf.Variable(tf.constant([0.5,0.5], dtype=np.float32), name="gate_2_3")
-        gate_2_3 = gate_2_3/tf.reduce_sum(gate_2_3)
-        conv_2_3 = conv2*gate_2_3[0] + conv3*gate_2_3[1]
-            #conv2 = softmax(conv2, 2)
-        #map_sparsity = tf.add(tf.reduce_mean(tf.abs(conv2)),
-        #        tf.reduce_mean((conv2)**2,)/2,
-        #        name = "map0_sparsity")
-        #tf.add_to_collection('losses', self.sparsity * map_sparsity)
-        # norm2
-        #norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
-        #                  name='norm2')
-        # pool2
-        #pool2 = tf.nn.max_pool(norm2, ksize=[1, 1, 3, 1],
-        #                       strides=[1, 1, 2, 1], padding='SAME', name='pool2')
+        gate_3 = tf.Variable(tf.constant([0.5,0.5], dtype=np.float32), name="gate_3")
+        gate_3 = gate_3/tf.reduce_sum(gate_2_3)
+        conv3g = conv_shortcut*gate_3[0] + conv3*gate_3[1]
+        """
+
         # tconv1 
         #print("tconv1", pool2.get_shape())
         with tf.variable_scope('tconv1') as scope:
@@ -237,57 +231,36 @@ class footprint_poisson(rtflearn):
             stride_w = 1
             pad_h = 1
             pad_w = 1
+            output_channels = 1
             kernel = _variable_with_weight_decay('weights',
-                            shape=[kernel_h, kernel_w, self.tconv1_channels, self.conv2_channels],
+                            shape=[kernel_h, kernel_w, output_channels, self.conv3_channels],
                             stddev=1e-4, wd=conv_wd)
-            inpshape = tf.shape(conv2)
+
+            #inpshape = tf.shape(conv2)
+            inpshape = conv3.get_shape()
             #print(scope.name, "inpshape", inpshape) 
-            h = ((inpshape[1] - 1) * stride_h) + kernel_h - 2 * pad_h
-            w = ((inpshape[2] - 1) * stride_w) + kernel_w - 2 * pad_w
+            h = ((int(inpshape[1]) - 1) * stride_h) + kernel_h - 2 * pad_h
+            w = ((int(inpshape[2]) - 1) * stride_w) + kernel_w - 2 * pad_w
             #output_shape =  [batch_size, h, w, self.xlen]
-            output_shape =  [batch_size, (inpshape[1] + stride_h - 1),
-                                (inpshape[2] + stride_w - 1) , self.tconv1_channels]
+            output_shape = [batch_size, (inpshape[1] + stride_h - 1),
+                                (inpshape[2] + stride_w - 1) , 1]# self.tconv1_channels]
             print(scope.name, output_shape)
             output_shape = tf.pack(output_shape)
-            tconv1 = tf.nn.conv2d_transpose(conv2, kernel, output_shape, strides=[1,1,1,1],
+            tconv1 = tf.nn.conv2d_transpose(conv3, kernel, output_shape, strides=[1,1,1,1],
                     padding='SAME', name=None)
-            #tconv1 = batch_norm(tconv1, is_training=self.train_time,
-            #                    n_out=self.tconv1_channels, scope=scope)
+            #if self.batch_norm:
+            #    tconv1 = batch_norm(tconv1, is_training=self.train_time,
+            #                        n_out=self.tconv1_channels, scope=scope)
 
+            tconv1 = tf.reshape(tconv1, [-1, self.xlen])
+            print(scope.name, tconv1.get_shape())
             _activation_summary(tconv1)
 
         #map_sparsity = tf.add(tf.reduce_mean(tf.abs(tconv1)),
         #        tf.reduce_mean((tconv1)**2,)/2, name ="map1_sparsity")
         #tf.add_to_collection('losses', self.sparsity * map_sparsity)
 
-        with tf.variable_scope('tconv2') as scope:
-            kernel_h = 1
-            kernel_w = 5
-            stride_h = 1
-            stride_w = 1
-            pad_h = 1
-            pad_w = 1
-            output_channels = 1
-            kernel = _variable_with_weight_decay('weights',
-                            shape=[kernel_h, kernel_w,
-                                   output_channels, self.tconv1_channels],
-                            stddev=1e-4, wd=conv_wd)
-            inpshape = tf.shape(tconv1)
-            h = ((inpshape[1] - 1) * stride_h) + kernel_h - 2 * pad_h
-            w = ((inpshape[2] - 1) * stride_w) + kernel_w - 2 * pad_w
-            #output_shape =  [batch_size, h, w, self.xlen]
-            output_shape =  [batch_size, (inpshape[1] + stride_h - 1),
-                                (inpshape[2] + stride_w - 1) , output_channels]
-            print(scope.name, output_shape)
-            output_shape = tf.pack(output_shape)
-            tconv2 = tf.nn.conv2d_transpose(tconv1, kernel,
-                            output_shape, strides=[1,1,1,1],
-                    padding='SAME', name=None)
-            #tconv2 = batch_norm(tconv2, is_training=self.train_time)#, n_out=output_channels, scope=scope)
-            tconv2 = tf.reshape(tconv2, [-1, self.xlen])
-            _activation_summary(tconv2)
-
-        self.vars.y_predicted = tconv2
+        self.vars.y_predicted = tconv1
         #self.vars.y_predicted = tf.reshape(self.vars.y_predicted, [-1, 1])
 
         #self.vars.y_predicted = gts * 1e-2
@@ -481,6 +454,7 @@ if __name__ == "__main__":
 
     flags = tf.app.flags
     flags.DEFINE_boolean('predict', False, 'If true, predicts')
+    flags.DEFINE_string('CHECKPOINT_PATH',"checkpoints/" , 'If true, predicts')
     FLAGS = flags.FLAGS
     print(flags.FLAGS)
     FLAGS.batch_size = 128
@@ -491,7 +465,8 @@ if __name__ == "__main__":
 
     # define artifact directories where results from the session can be saved
     model_path = os.environ.get('MODEL_PATH', 'models/')
-    checkpoint_path = os.environ.get('CHECKPOINT_PATH', 'checkpoints/')
+    #checkpoint_path = os.environ.get('CHECKPOINT_PATH', 'checkpoints/')
+    checkpoint_path = flags.FLAGS.CHECKPOINT_PATH
     summary_path = os.environ.get('SUMMARY_PATH', 'logs/')
 
     "paths to the data sets"
@@ -501,7 +476,7 @@ if __name__ == "__main__":
 
     from match_dna_atac import get_aligned_batch, get_loader
     #from itertools import cycle
-    train_batchloader = get_loader(conn, where={"chr": "chr20"}, binary=False)
+    train_batchloader = get_loader(conn, where={"chr": "chr21"}, binary=False)
     test_batchloader = get_loader(conn, where="chr = 'chr22'", binary=False)
 
     #sys.exit(1)
@@ -511,16 +486,16 @@ if __name__ == "__main__":
     tfl = footprint_poisson(
             sparsity = 1e-2,
             batch_norm = False,
-            BATCH_SIZE = 2**7,
-            dropout = 0.25,
+            BATCH_SIZE = 2**8,
+            dropout = 0.5,
             xlen = 2001,
             display_step = 100,
             xdepth = 4,
-            weight_decay = 0.02583,
+            weight_decay = 0.0583,
             conv1_channels = 128,
             conv2_channels = 32,
-            tconv1_channels = 32,
-            lr = 0.05,
+            conv3_channels = 8,
+            lr = 0.01,
             )
     print(tfl.parameters.keys())
     if not FLAGS.predict:
@@ -531,29 +506,16 @@ if __name__ == "__main__":
         print(tfl.loss)
         print(tfl.get_loss(test_batchloader))
     else:
+        from copy import copy
         print("predicting")
         testbl = test_batchloader(500)
         yhat_list = []
         y_list = []
         try:
             for nn, (xx, yy) in enumerate(testbl):
-                tfl = footprint_poisson(
-                        sparsity = 1e-2,
-                        batch_norm = False,
-                        BATCH_SIZE = 2**8,
-                        dropout = 0.5,
-                        xlen = 2001,
-                        display_step = 100,
-                        xdepth = 4,
-                        weight_decay = 0.02583,
-                        conv1_channels = 128,
-                        conv2_channels = 32,
-                        tconv1_channels = 32,
-                        lr = 0.02,
-                        )
-
+                tfl_ = copy(tfl)
                 print(nn)
-                yhat = tfl.predict(xx)
+                yhat = tfl_.predict(xx)
                 yhat_list.append(yhat)
                 y_list.append(yy)
                 break
@@ -568,15 +530,21 @@ if __name__ == "__main__":
             print("y_mean", y_mean.shape)
             print(yhat_var.shape)
             fig, axs = plt.subplots(2)
-            axs[0].plot(tt[valid], np.exp(yhat_mean[valid]), c="b", zorder=1, lw=2 )
-            axs[0].plot(tt[valid], (yhat_var[valid]), c="g", zorder=2 )
+            axs[0].plot(tt[valid], np.exp(yhat_mean[valid]), ".-", c="b", zorder=1, lw=1.2 )
+            axs[0].plot(tt[valid], (yhat_var[valid]), ".-", c="g", )
+            axs[0].axvline(0, c=[0.3]*3)
+            axs[0].axvline(10, c=[0.3]*3)
+            axs[0].axvline(-10, c=[0.3]*3)
             axs[0].set_ylim(np.exp(np.r_[ min(yhat_mean[valid]), max(yhat_mean[valid]) ]))
             print(min(yhat_var[valid]), max(yhat_var[valid]))
             #axs[0].set_xlim([0, np.exp(max(yhat[0]))+0.01 ])
             #for t_ in tt[ (y_mean>0) & valid]:
             #    axs[0].axvline(t_, c='r')
             #ax.scatter(tt, yy[0],c=(1,0,0,1), edgecolors="none", zorder=2 )
-            axs[1].plot(tt[valid], y_mean[valid], c='r')
+            axs[1].plot(tt[valid], y_mean[valid], ".-", c='r')
+            axs[1].axvline(0, c=[0.3]*3)
+            axs[1].axvline(10, c=[0.3]*3)
+            axs[1].axvline(-10, c=[0.3]*3)
             #axs[1].stem(tt[valid], y_mean[valid], markerfmt='ro',linefmt='r-',
             #            edgecolors="none", zorder=2 )
             #axs[1].set_xlim([0, max(yy[0]+1)])
