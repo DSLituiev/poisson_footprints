@@ -18,6 +18,20 @@ from tflearn import rtflearn, vardict,  summary_dict, batch_norm
 # names of the summaries when visualizing a model.
 TOWER_NAME = 'tower'
 
+def deconv_output_length(input_length, filter_size, stride, border_mode="same" ):
+    #print("input_lenght: {}, filter_size: {}, border_mode: {}, stride: {}".format(
+    #    input_length, filter_size, border_mode, stride
+    #))
+    if input_length is None:
+        return None
+    assert border_mode.lower() in {'same', 'valid'}
+    if border_mode.lower() == 'same':
+        output_length = input_length * stride
+    elif border_mode.lower() == 'valid':
+        # output_length = input_length * stride - filter_size + 1
+        output_length = (input_length - 1) * stride + filter_size
+    return output_length
+
 def diff(x, axis=-1):
     xsh = x.get_shape()
     xsh = np.r_[[int(c) for c in xsh]]
@@ -39,6 +53,14 @@ def softmax(target, axis, name=None):
         target_exp = tf.exp(target-max_axis)
         normalize = tf.reduce_sum(target_exp, axis, keep_dims=True)
         softmax = target_exp / normalize
+    return softmax
+
+def softmaxsq(target, axis, name=None):
+    with tf.op_scope([target], name, 'softmaxsq'):
+        #max_axis = tf.reduce_max(target, axis, keep_dims=True)
+        targetsq = (target)**2
+        normalize = tf.reduce_sum(targetsq, axis, keep_dims=True)
+        softmax = targetsq / normalize
     return softmax
 
 def poisson_loss(y, log_y_predicted, pad=0):
@@ -114,7 +136,8 @@ def smooth_filter(name, shape, stddev, wd, axis=1):
     return var
 
 
-def _variable_with_weight_decay(name, shape, stddev, wd):
+def _variable_with_weight_decay(name, shape, stddev, wd,
+        initializer=tf.contrib.layers.xavier_initializer()):
     """Helper to create an initialized Variable with weight decay.
     Note that the Variable is initialized with a truncated normal distribution.
     A weight decay is added only if one is specified.
@@ -129,7 +152,7 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
     """
     #var = _variable_on_cpu(name, shape,
     #                       tf.truncated_normal_initializer(stddev=stddev))
-    var = tf.get_variable(name, shape, initializer=tf.contrib.layers.xavier_initializer())
+    var = tf.get_variable(name, shape, initializer=initializer)
             #tf.truncated_normal_initializer(stddev=stddev))
     if wd is not None:
         weight_decay = tf.mul(tf.nn.l2_loss(var), wd, name='weight_loss')
@@ -147,16 +170,17 @@ def conv_layer(inp, width, depth, conv_wd,
         conv = tf.nn.conv2d(inp, kernel, [1, 1, 1, 1], padding='SAME')
         biases = tf.get_variable('biases', [depth],
                                  initializer=tf.constant_initializer(0.01))
-        bias = tf.nn.bias_add(conv, biases)
+        conv = tf.nn.bias_add(conv, biases)
 
-        conv2 = tf.nn.softplus(bias, name=scope.name)
-        print(scope.name, conv2.get_shape())
-        _activation_summary(conv2)
-        conv2 = tf.nn.dropout(conv2, 1-dropout)
+        #conv2 = tf.nn.softplus(bias, name=scope.name)
+        conv = tf.nn.elu(conv, name=scope.name)
+        print(scope.name, conv.get_shape())
+        _activation_summary(conv)
+        conv = tf.nn.dropout(conv, 1-dropout)
         if batch_norm:
-            conv2 = batch_norm(conv2, is_training=self.train_time,
+            conv = batch_norm(conv, is_training=self.train_time,
                            n_out=depth, scope=scope)
-        return conv2
+        return conv
 
 
 class footprint_poisson(rtflearn):
@@ -177,22 +201,31 @@ class footprint_poisson(rtflearn):
 
         # Create Model
         with tf.variable_scope('conv1') as scope:
+            temperatures = tf.get_variable('temperatures', [self.conv1_channels],
+                                     initializer=tf.constant_initializer(1.0))
+
+            kernel_shape = [1, 3, self.xdepth, self.conv1_channels]
             kernel = _variable_with_weight_decay('weights',
                             shape=[1, 5, self.xdepth, self.conv1_channels],
-                            stddev=1e-4, wd= conv_wd)
-            conv = tf.nn.conv2d(self.vars.x, kernel, [1, 1, 1, 1], padding='SAME')
+                            stddev=1e-4, wd= conv_wd,
+                            initializer= tf.constant_initializer(np.log2(np.random.rand(*kernel_shape)) ))
+            kernel = tf.mul(kernel, temperatures)
+            kernel_information = tf.reduce_sum(kernel*tf.exp(kernel),
+                    name="kernel_information")
+            _activation_summary(kernel_information)
+            #tf.add_to_collection('losses', -kernel_information)
+            conv1 = tf.nn.conv2d(self.vars.x, kernel, [1, 1, 1, 1], padding='SAME')
             biases = tf.get_variable('biases', [self.conv1_channels],
                                      initializer=tf.constant_initializer(0.01))
-            #biases = _variable_on_cpu('biases', [conv1_channels],
-            #                          tf.constant_initializer(0.0))
-            bias = tf.nn.bias_add(conv, biases)
-            conv1 = tf.nn.relu(bias, name=scope.name)
+            conv1 = tf.nn.bias_add(conv1, biases)
+            #conv1 = tf.nn.relu(bias, name=scope.name)
             print("conv1", conv1.get_shape())
             #conv1 = tf.nn.dropout(conv1, 1-self.dropout)
             if self.batch_norm:
                 conv1 = batch_norm(conv1,
                     is_training=self.train_time, n_out=self.conv1_channels, scope=scope)
-            conv1 = softmax(conv1,2)
+
+            conv1 = softmaxsq(conv1, 2)
             _activation_summary(conv1)
         # pool1
         #pool1 = tf.nn.max_pool(conv1, ksize=[1, 1, 3, 1], strides=[1, 1, 2, 1],
@@ -209,20 +242,39 @@ class footprint_poisson(rtflearn):
         conv3 = conv_layer(conv2, width=3, depth=self.conv3_channels,
                 conv_wd = conv_wd, name = "conv3",
                 batch_norm = self.batch_norm,
-                dropout=self.dropout)
+               dropout=self.dropout)
 
-        """
-        conv_shortcut = conv_layer(conv1, width=5, depth=self.conv3_channels,
-                conv_wd = conv_wd, name = "conv3",
+        conv_shortcut = conv_layer(conv1, width=1, depth=self.conv3_channels,
+                conv_wd = conv_wd, name = "conv_shortcut1",
                 batch_norm = self.batch_norm,
                 dropout=self.dropout)
 
         gate_3 = tf.Variable(tf.constant([0.5,0.5], dtype=np.float32), name="gate_3")
-        gate_3 = gate_3/tf.reduce_sum(gate_2_3)
+        gate_3 = gate_3/tf.reduce_sum(gate_3)
         conv3g = conv_shortcut*gate_3[0] + conv3*gate_3[1]
+
+        tconv1 = conv_layer(conv1, width=1, depth=1,
+                conv_wd = conv_wd, name = "conv4",
+                batch_norm = self.batch_norm,
+                dropout=self.dropout)
+
+        #tconv1 = tf.reshape(tconv1, [-1, self.xlen])
+        tconv1 = tf.squeeze(tconv1, [1,3])
+
+        """
+        conv4 = conv_layer(conv3, width=3, depth=self.conv3_channels,
+                conv_wd = conv_wd, name = "conv4",
+                batch_norm = self.batch_norm,
+                dropout=self.dropout)
+
+        conv4 = conv_layer(conv3, width=3, depth=self.conv3_channels,
+                conv_wd = conv_wd, name = "conv5",
+                batch_norm = self.batch_norm,
+                dropout=self.dropout)
         """
 
-        # tconv1 
+        """
+        # tconv1
         #print("tconv1", pool2.get_shape())
         with tf.variable_scope('tconv1') as scope:
             kernel_h = 1
@@ -237,7 +289,11 @@ class footprint_poisson(rtflearn):
                             stddev=1e-4, wd=conv_wd)
 
             #inpshape = tf.shape(conv2)
-            inpshape = conv3.get_shape()
+            inpshape = conv3g.get_shape()
+            input_length = inpshape[1]
+            filter_size = 7
+            stride = 3
+            output_length = deconv_output_length(input_length, filter_size, stride, border_mode="same" )
             #print(scope.name, "inpshape", inpshape) 
             h = ((int(inpshape[1]) - 1) * stride_h) + kernel_h - 2 * pad_h
             w = ((int(inpshape[2]) - 1) * stride_w) + kernel_w - 2 * pad_w
@@ -246,7 +302,7 @@ class footprint_poisson(rtflearn):
                                 (inpshape[2] + stride_w - 1) , 1]# self.tconv1_channels]
             print(scope.name, output_shape)
             output_shape = tf.pack(output_shape)
-            tconv1 = tf.nn.conv2d_transpose(conv3, kernel, output_shape, strides=[1,1,1,1],
+            tconv1 = tf.nn.conv2d_transpose(conv3g, kernel, output_shape, strides=[1,1,1,1],
                     padding='SAME', name=None)
             #if self.batch_norm:
             #    tconv1 = batch_norm(tconv1, is_training=self.train_time,
@@ -255,7 +311,7 @@ class footprint_poisson(rtflearn):
             tconv1 = tf.reshape(tconv1, [-1, self.xlen])
             print(scope.name, tconv1.get_shape())
             _activation_summary(tconv1)
-
+        """
         #map_sparsity = tf.add(tf.reduce_mean(tf.abs(tconv1)),
         #        tf.reduce_mean((tconv1)**2,)/2, name ="map1_sparsity")
         #tf.add_to_collection('losses', self.sparsity * map_sparsity)
@@ -351,7 +407,7 @@ class footprint_poisson(rtflearn):
                 #for macro_epoch in tqdm(range( self.last_ckpt_num//self.display_step ,
                 #                         (self.last_ckpt_num + self.epochs)//  self.display_step )):
                 "do minibatches"
-                for epoch in tqdm(range(self.epochs)):
+                for epoch in tqdm(range(self.last_ckpt_num, self.last_ckpt_num + self.epochs)):
                     for ii, (_x_, _y_) in enumerate(train_batch_getter):
                         if len(_y_.shape) == 1:
                             _y_ = np.reshape(_y_, [-1, 1])
@@ -494,13 +550,13 @@ if __name__ == "__main__":
             BATCH_SIZE = 2**8,
             dropout = 0.25,
             xlen = 2001,
-            display_step = 100,
+            display_step = 50,
             xdepth = 4,
-            weight_decay = 0.0583,
+            weight_decay = 0.08,
             conv1_channels = 128,
             conv2_channels = 32,
             conv3_channels = 8,
-            lr = 0.01,
+            lr = 0.1,
             checkpoint_dir = flags.FLAGS.checkpoints,
             logdir = flags.FLAGS.logdir,
             )
@@ -525,34 +581,42 @@ if __name__ == "__main__":
                 yhat = tfl_.predict(xx)
                 yhat_list.append(yhat)
                 y_list.append(yy)
-                break
+                if nn>2:
+                    break
         finally:
             tt = np.arange(len(yhat[0])) - 1000
 
             valid = abs(tt) < 50
-            yhat_mean = np.mean(np.mean(np.stack(yhat_list), axis=0), axis=0 )
+            yhat_list = np.stack(yhat_list)
+            yhat_mean = np.mean(np.mean(yhat_list, axis=0), axis=0 )
             print("yhat_mean", yhat_mean.shape)
-            yhat_var = np.var(np.var( np.exp(np.stack(yhat_list)), axis=0 ), axis=0)
+            yhat_var = np.var(np.var( np.exp(yhat_list), axis=0 ), axis=0)
             y_mean = np.mean(np.mean( np.stack(y_list), axis=0 ), axis=0)
             #print("y_mean", y_mean.shape)
             print(yhat_var.shape)
             print(yhat_var[:10])
-            fig, axs = plt.subplots(2)
+            print("yhat_list")
+            print(yhat_list[:10])
+            fig, axs = plt.subplots(3)
             axs[0].plot(tt[valid], np.exp(yhat_mean[valid]), ".-", c="b", zorder=1, lw=1.2 )
-            axs[0].plot(tt[valid], (yhat_var[valid]), ".-", c="g", )
             axs[0].axvline(0, c=[0.3]*3)
             axs[0].axvline(10, c=[0.3]*3)
             axs[0].axvline(-10, c=[0.3]*3)
             axs[0].set_ylim(np.exp(np.r_[ min(yhat_mean[valid]), max(yhat_mean[valid]) ]))
             print(min(yhat_var[valid]), max(yhat_var[valid]))
+            axs[1].plot(tt[valid], (yhat_var[valid]), ".-", c="g", )
+            axs[1].axvline(0, c=[0.3]*3)
+            axs[1].axvline(10, c=[0.3]*3)
+            axs[1].axvline(-10, c=[0.3]*3)
+
             #axs[0].set_xlim([0, np.exp(max(yhat[0]))+0.01 ])
             #for t_ in tt[ (y_mean>0) & valid]:
             #    axs[0].axvline(t_, c='r')
             #ax.scatter(tt, yy[0],c=(1,0,0,1), edgecolors="none", zorder=2 )
-            axs[1].plot(tt[valid], y_mean[valid], ".-", c='r')
-            axs[1].axvline(0, c=[0.3]*3)
-            axs[1].axvline(10, c=[0.3]*3)
-            axs[1].axvline(-10, c=[0.3]*3)
+            axs[2].plot(tt[valid], y_mean[valid], ".-", c='r')
+            axs[2].axvline(0, c=[0.3]*3)
+            axs[2].axvline(10, c=[0.3]*3)
+            axs[2].axvline(-10, c=[0.3]*3)
             #axs[1].stem(tt[valid], y_mean[valid], markerfmt='ro',linefmt='r-',
             #            edgecolors="none", zorder=2 )
             #axs[1].set_xlim([0, max(yy[0]+1)])
